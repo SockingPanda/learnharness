@@ -3,6 +3,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { serverExecute } from "../tool-execute.ts";
 import type { JobRecord } from "../../core/contracts.ts";
 import type { JobStore } from "../../core/ports.ts";
+import { isStorageStopping, StorageStoppingError } from "../../core/storage-lifecycle.ts";
 
 /**
  * Async sub-agent job tools (vision §2.5; W2/W6 kinds + the pi-model
@@ -70,15 +71,26 @@ export const pdfInputSchema = Type.Object({
  * The per-call dispatch: create the job (idempotent by toolCallId), fire the
  * runner, and return the ack. Shared by all three tools — only kind differs.
  */
-function dispatch(
+async function dispatch(
 	ctx: JobToolContext,
 	kind: JobRecord["kind"],
 	toolCallId: string,
 	ack: string,
 	input: ResearchInput | DemoInput | VisualInput | PdfInput,
-): string {
-	const existing = ctx.jobStore.findJobByToolCallId(ctx.chatId, toolCallId);
-	const job = existing ?? ctx.jobStore.createJob({ kind, chatId: ctx.chatId, toolCallId, input });
+): Promise<string> {
+	if (isStorageStopping()) throw new StorageStoppingError();
+	const existing = await ctx.jobStore.findJobByToolCallId(ctx.chatId, toolCallId);
+	if (isStorageStopping()) throw new StorageStoppingError();
+	const job = existing ?? await ctx.jobStore.createJob({ kind, chatId: ctx.chatId, toolCallId, input });
+	if (isStorageStopping()) {
+		// A record created during the await gap was never spawned or acked.
+		// Leave a terminal interruption, not a running orphan that recovery
+		// might later execute without the original turn's acknowledgement.
+		if (!existing) await ctx.jobStore.updateJob(job.id, {
+			status: "error", error: "Application is shutting down", activity: "interrupted",
+		});
+		throw new StorageStoppingError();
+	}
 	if (!existing) ctx.spawn(job, input);
 	return `Dispatched (job ${job.id}). ${ack}`;
 }

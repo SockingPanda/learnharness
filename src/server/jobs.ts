@@ -68,10 +68,12 @@ import {
 import type { TurnInput } from "../core/input-events.ts";
 import { danglingQuestionOf, endsInDismissal, type LhMessage } from "../core/native-messages.ts";
 import { fireJobAbort, isJobLive } from "../agent/subagents/aborts.ts";
-import { stores, effectiveSettings } from "./stores.ts";
+import { stores, effectiveSettings, storageMode } from "./stores.ts";
 import { resolveConversationSpec } from "../core/settings-resolution.ts";
 import { connectionBackgroundAllowed, isSubscriptionProvider, onSubscriptionChange } from "../agent/subscription-connections.ts";
 import { isTurnRunning } from "./turn-liveness.ts";
+import { withChatWrite } from "../core/storage-coordination.ts";
+import { isStorageStopping, StorageStoppingError } from "../core/storage-lifecycle.ts";
 import type { Agent } from "@earendil-works/pi-agent-core";
 
 /** Fires one server-side teacher turn: (chatId, input) → HTTP-ish status.
@@ -86,6 +88,7 @@ export type JobRespawn = (jobId: string) => void;
 interface QueuedSteer {
 	steer: SteerMessage;
 	promise: Promise<void>;
+	completion?: Promise<void>;
 	/** Wake cargo remains owned here, but must not steer into its own run. */
 	waking?: boolean;
 	/** The constructed vehicle, once startup claims a turn. Until then only
@@ -125,6 +128,9 @@ interface WakeState {
 	lastSweepAt: number;
 	stopConnectionWatch?: () => void;
 	automaticDeferred: WeakSet<Agent>;
+	/** Includes asynchronous job→chat lookup, so duplicate callers share one promise. */
+	deliveryLookups?: Map<string, Promise<void>>;
+	pendingWrites?: Set<Promise<unknown>>;
 }
 
 interface LhWakeGlobal {
@@ -134,6 +140,19 @@ interface LhWakeGlobal {
 function state(): WakeState {
 	const g = globalThis as typeof globalThis & LhWakeGlobal;
 	return (g.__lhWakePipeline ??= { queues: new Map(), liveAgents: new Map(), userSteers: new Map(), pumping: new Set(), lastSweepAt: 0, automaticDeferred: new WeakSet() });
+}
+
+/** Track finite wake work, never a delivery promise waiting for learner input. */
+function trackWakeWrite<T>(work: () => Promise<T>): Promise<T> {
+	const pending = state().pendingWrites ??= new Set();
+	const operation = work();
+	pending.add(operation);
+	void operation.then(() => pending.delete(operation), () => pending.delete(operation));
+	return operation;
+}
+
+export async function awaitWakeWrites(): Promise<void> {
+	while (state().pendingWrites?.size) await Promise.allSettled([...state().pendingWrites!]);
 }
 
 /** chat-handler wires this at module init: its adapter around handleChatRequest. */
@@ -179,13 +198,14 @@ function jobIdOf(steer: SteerMessage): string | null {
 /** Call only after canonical conversation persistence. Streaming visibility
  * is not durable acceptance. The saved marker wins over delivery-bookkeeping
  * failures; acknowledging delivery never changes the worker's outcome. */
-export function noteSteersDurable(chatId: string, persisted: readonly LhMessage[]): void {
-	for (const message of persisted) {
-		if (message.role === "custom") finalizeSteer(message);
-	}
-	for (const entry of [...(state().queues.get(chatId) ?? [])]) {
-		if (persisted.some((message) => message.id === entry.steer.id)) completeEntry(chatId, entry);
-	}
+export async function noteSteersDurable(chatId: string, persisted: readonly LhMessage[]): Promise<void> {
+	const entries = [...(state().queues.get(chatId) ?? [])];
+	const pending = new Map(entries.map((entry) => [entry.steer.id, entry]));
+	await Promise.all(persisted.flatMap((message) => {
+		const entry = pending.get(message.id);
+		if (entry) return [completeEntry(chatId, entry)];
+		return message.role === "custom" ? [finalizeSteer(message)] : [];
+	}));
 }
 
 function removeEntry(chatId: string, entry: QueuedSteer): void {
@@ -194,10 +214,13 @@ function removeEntry(chatId: string, entry: QueuedSteer): void {
 	else state().queues.delete(chatId);
 }
 
-function completeEntry(chatId: string, entry: QueuedSteer): void {
-	finalizeSteer(entry.steer);
+function completeEntry(chatId: string, entry: QueuedSteer): Promise<void> {
+	if (entry.completion) return entry.completion;
+	// Remove ownership synchronously, but callers observe completion only
+	// after the best-effort delivery receipt has finished its write.
 	removeEntry(chatId, entry);
-	entry.resolve();
+	entry.completion = finalizeSteer(entry.steer).then(() => { entry.resolve(); });
+	return entry.completion;
 }
 
 /** Deletion discards the session's obligations, never wakes a deleted chat. */
@@ -210,9 +233,9 @@ export function discardChatDeliveries(chatId: string): void {
 }
 
 /** Finalize a delivered steer's job bookkeeping — job steers only. */
-function finalizeSteer(steer: SteerMessage): void {
+async function finalizeSteer(steer: SteerMessage): Promise<void> {
 	const jobId = jobIdOf(steer);
-	if (jobId) finalizeJob(jobId);
+	if (jobId) await finalizeJob(jobId);
 }
 
 /** Queue one logical delivery per ID, including in-flight wake cargo.
@@ -220,10 +243,19 @@ function finalizeSteer(steer: SteerMessage): void {
  * failed starts stay pending. Non-job probe handoffs keep their existing
  * wake-acceptance/error semantics. Workers never await this promise. */
 export function deliverJobResult(steer: SteerMessage): Promise<void> {
-	const chatId = chatIdOf(steer);
-	const entry = queueSteer(chatId, steer);
-	void pump(chatId);
-	return entry.promise;
+	const lookups = state().deliveryLookups ??= new Map();
+	const existing = lookups.get(steer.id);
+	if (existing) return existing;
+	const delivery = (async () => {
+		const chatId = await trackWakeWrite(() => chatIdOf(steer));
+		if (!chatId) throw new Error(`Cannot resolve the session for delivery ${steer.id}`);
+		const entry = queueSteer(chatId, steer);
+		void pump(chatId);
+		await entry.promise;
+	})();
+	lookups.set(steer.id, delivery);
+	void delivery.finally(() => { if (lookups.get(steer.id) === delivery) lookups.delete(steer.id); }).catch(() => undefined);
+	return delivery;
 }
 
 function queueSteer(chatId: string, steer: SteerMessage): QueuedSteer {
@@ -249,18 +281,26 @@ function queueSteer(chatId: string, steer: SteerMessage): QueuedSteer {
  *  beats the loop's synchronous start-poll drain and the marker rides the
  *  run's FIRST LLM call (the native equivalent of the old continuation
  *  coalescing). */
-export function automaticFollowUpAllowed(chatId: string, agent?: Agent): boolean {
-	if (agent && state().automaticDeferred.has(agent)) return false;
-	const provider = agent?.state?.model?.provider ?? resolveConversationSpec(stores.chatStore.getChat(chatId)?.settings, effectiveSettings().models.strong)?.provider;
+function automaticLiveFollowUpAllowed(agent: Agent): boolean {
+	return !isStorageStopping() && !state().automaticDeferred.has(agent) && connectionBackgroundAllowed(agent.state?.model?.provider);
+}
+
+export async function automaticFollowUpAllowed(chatId: string, agent?: Agent): Promise<boolean> {
+	if (isStorageStopping()) return false;
+	if (agent) return automaticLiveFollowUpAllowed(agent);
+	const chat = await stores.chatStore.getChat(chatId);
+	if (!chat || chat.deleting || isStorageStopping() || (storageMode() === "any" && chat.pendingTurnId)) return false;
+	const provider = resolveConversationSpec(chat.settings, effectiveSettings().models.strong)?.provider;
 	return connectionBackgroundAllowed(provider);
 }
 
 function handOffEligible(chatId: string, agent: Agent): void {
+	if (isStorageStopping()) return;
 	const queue = state().queues.get(chatId);
 	// Keep automatic results in their owning registry. Never mix them into a
 	// foreground batch without express account consent. Learner steers below
 	// remain deliverable, including the first poll of an answer run.
-	if (automaticFollowUpAllowed(chatId, agent) && queue && queue.length > 0) {
+	if (automaticLiveFollowUpAllowed(agent) && queue && queue.length > 0) {
 		for (const entry of queue) {
 			if (!entry.waking && !entry.deferred && entry.handedTo !== agent && entry.steer.customType !== "probe-handoff") {
 				agent.steer(entry.steer);
@@ -289,9 +329,11 @@ function handOffEligible(chatId: string, agent: Agent): void {
  *  markers are steered into the run right here. The settle seam cannot
  *  beat the registration: settlement needs a streamed response, which
  *  never happens inside the constructor call. */
-export function registerLiveAgent(chatId: string, agent: Agent, allowDeferred = true, wakeSteerIds?: ReadonlySet<string>): void {
+export async function registerLiveAgent(chatId: string, agent: Agent, allowDeferred = true, wakeSteerIds?: ReadonlySet<string>): Promise<void> {
+	if (isStorageStopping()) throw new StorageStoppingError();
 	state().liveAgents.set(chatId, agent);
-	restorePendingDeliveries(chatId);
+	await restorePendingDeliveries(chatId, storageMode() === "any" && !allowDeferred);
+	if (isStorageStopping()) throw new StorageStoppingError();
 	for (const entry of state().queues.get(chatId) ?? []) {
 		if (allowDeferred) entry.deferred = false;
 		if (entry.waking && wakeSteerIds?.has(entry.steer.id)) entry.wakeAgent = agent;
@@ -316,6 +358,7 @@ export interface UserSteerEntry {
  *  termination, abort), reconcileUserSteers keeps it parked for the
  *  chat's next run. */
 export function steerLiveChat(chatId: string, message: LhMessage): boolean {
+	if (isStorageStopping()) return false;
 	const agent = state().liveAgents.get(chatId);
 	if (!agent) return false;
 	const entry: UserSteerEntry = { message };
@@ -382,8 +425,7 @@ export function settleSteers(chatId: string, persisted: { id?: string }[], faile
 	const remaining: QueuedSteer[] = [];
 	for (const entry of queue) {
 		if (deliveredIds.has(entry.steer.id)) {
-			finalizeSteer(entry.steer);
-			entry.resolve();
+			void completeEntry(chatId, entry);
 		} else {
 			const handedHere = entry.handedTo !== undefined && (!settledAgent || entry.handedTo === settledAgent);
 			const wakeHere = settledAgent !== undefined && entry.wakeAgent === settledAgent;
@@ -428,27 +470,30 @@ export interface AbortOutcome {
  * The runner writes the usage folded so far in its finally (merge patch),
  * so an aborted job's money record survives the kill.
  */
-export function abortJob(jobId: string): AbortOutcome {
-	const job = stores.jobStore.getJob(jobId);
-	if (!job) return { ok: false, reason: "not_found" };
-	if (job.status !== "running") return { ok: false, reason: "not_running" };
-	if (job.result) {
-		normalizeLegacyResult(job);
-		return { ok: false, reason: "not_running" };
-	}
-
-	fireJobAbort(jobId);
-	stores.jobStore.updateJob(jobId, {
-		status: "error", error: "Aborted by learner", activity: "aborted",
-		delivery: { kind: "abort", status: "pending" },
+export async function abortJob(jobId: string): Promise<AbortOutcome> {
+	const existing = await stores.jobStore.getJob(jobId);
+	if (!existing) return { ok: false, reason: "not_found" };
+	return withChatWrite(existing.chatId, async () => {
+		const job = await stores.jobStore.getJob(jobId);
+		if (!job) return { ok: false, reason: "not_found" };
+		if (job.status !== "running") return { ok: false, reason: "not_running" };
+		if (job.result) {
+			await normalizeLegacyResult(job);
+			return { ok: false, reason: "not_running" };
+		}
+		fireJobAbort(jobId);
+		await stores.jobStore.updateJob(jobId, {
+			status: "error", error: "Aborted by learner", activity: "aborted",
+			delivery: { kind: "abort", status: "pending" },
+		});
+		void deliverJobResult(buildAbortSteer(job)).catch(() => {
+			/* The saved pending abort notice remains owned by the session. */
+		});
+		return { ok: true };
 	});
-	void deliverJobResult(buildAbortSteer(job)).catch(() => {
-		/* The saved pending abort notice remains owned by the session. */
-	});
-	return { ok: true };
 }
 
-function chatIdOf(steer: SteerMessage): string {
+async function chatIdOf(steer: SteerMessage): Promise<string> {
 	// The probe handoff carries its chat directly in the marker details (the
 	// job record would say it too, but the details are the cheap path).
 	if (steer.customType === "probe-handoff") {
@@ -457,7 +502,7 @@ function chatIdOf(steer: SteerMessage): string {
 	// The chat is resolvable from the job record; the steer's details
 	// carry jobId, which indexes the store.
 	const jobId = jobIdOf(steer);
-	const job = jobId ? stores.jobStore.getJob(jobId) : undefined;
+	const job = jobId ? await stores.jobStore.getJob(jobId) : undefined;
 	return job?.chatId ?? "";
 }
 
@@ -471,14 +516,18 @@ function chatIdOf(steer: SteerMessage): string {
  * more to do here until settlement re-pumps); otherwise the IDLE WAKE
  * fires ONE turn carrying every pending marker as its input appends.
  */
-async function pump(chatId: string): Promise<void> {
-	if (!chatId) return;
+function pump(chatId: string): Promise<void> {
+	return trackWakeWrite(() => runPump(chatId));
+}
+
+async function runPump(chatId: string): Promise<void> {
+	if (!chatId || isStorageStopping()) return;
 	const s = state();
 	if (s.pumping.has(chatId)) return;
 	s.pumping.add(chatId);
 	let parked = false;
 	try {
-		for (let attempt = 0; ; ) {
+		for (let attempt = 0; !isStorageStopping(); ) {
 			const queue = s.queues.get(chatId);
 			if (!queue || queue.length === 0) {
 				s.queues.delete(chatId);
@@ -486,8 +535,8 @@ async function pump(chatId: string): Promise<void> {
 			}
 
 			// Gone chat: nothing to deliver into.
-			const record = stores.chatStore.getChat(chatId);
-			if (!record) {
+			const record = await stores.chatStore.getChat(chatId);
+			if (!record || record.deleting) {
 				s.queues.delete(chatId);
 				for (const entry of queue) {
 					entry.reject(new Error(`chat ${chatId} not found — cannot deliver steer ${entry.steer.id}`));
@@ -498,10 +547,10 @@ async function pump(chatId: string): Promise<void> {
 			// Idempotent delivery: the transcript already carries these steers
 			// (an in-run injection persisted, a wake completed, or a duplicate
 			// deliver raced in). Resolve and flip without re-firing anything.
-			noteSteersDurable(chatId, record.messages);
+			await noteSteersDurable(chatId, record.messages);
 			const stillPending = (s.queues.get(chatId) ?? []).filter((entry) => !entry.waking && !entry.deferred);
 			if (stillPending.length === 0) { parked = true; return; }
-			if (!automaticFollowUpAllowed(chatId, s.liveAgents.get(chatId))) { parked = true; return; }
+			if (!(await automaticFollowUpAllowed(chatId, s.liveAgents.get(chatId)))) { parked = true; return; }
 
 			// VEHICLE 1 — THE LIVE RUN: pi's steering queue. The agent of the
 			// streaming turn takes every eligible marker; pi injects at the
@@ -533,12 +582,13 @@ async function pump(chatId: string): Promise<void> {
 			// pending marker as its input appends (the handler write-ahead
 			// persists them under the wake's own turn claim).
 			await waitForIdle(chatId);
+			if (isStorageStopping()) return;
 
 			// Re-fetch AFTER the gates open — waitForIdle can wait out a quiz
 			// answer (minutes), and sending the pre-wait snapshot would clobber
 			// the client's answer + continuation in the write-ahead persist.
-			const fresh = stores.chatStore.getChat(chatId);
-			if (!fresh) {
+			const fresh = await stores.chatStore.getChat(chatId);
+			if (!fresh || fresh.deleting) {
 				continue; // the gone-chat branch rejects next iteration
 			}
 
@@ -553,7 +603,7 @@ async function pump(chatId: string): Promise<void> {
 
 			// A live run may have delivered some markers while the gates were
 			// closed — re-check: only still-missing markers ride the wake.
-			noteSteersDurable(chatId, fresh.messages);
+			await noteSteersDurable(chatId, fresh.messages);
 			const fire = (s.queues.get(chatId) ?? []).filter((entry) => !entry.waking && !entry.deferred && !entry.handedTo);
 			if (fire.length === 0) return;
 
@@ -564,7 +614,7 @@ async function pump(chatId: string): Promise<void> {
 			// hands them to that turn once the text-claim lands — until then,
 			// settlement re-pumps and lands them right after it). The pause is
 			// derived from the tail, so any user message un-holds by construction.
-			if (endsInDismissal(fresh.messages) || !automaticFollowUpAllowed(chatId)) {
+			if (endsInDismissal(fresh.messages) || !(await automaticFollowUpAllowed(chatId))) {
 				parked = true;
 				return;
 			}
@@ -577,12 +627,13 @@ async function pump(chatId: string): Promise<void> {
 			// Fire the wake with cargo still registered. A 409 releases its
 			// vehicle flag and retries after the existing backoff, without
 			// appending another registry entry.
+			if (isStorageStopping()) return;
 			const status = await s.turnRunner(chatId, { type: "steers", steers }).catch((err: unknown) => {
 				console.error(`[steer ${steers.map((x) => x.id).join(",")}] wake turn crashed:`, err);
 				return -1;
 			});
-			const saved = stores.chatStore.getChat(chatId);
-			if (saved) noteSteersDurable(chatId, saved.messages);
+			const saved = await stores.chatStore.getChat(chatId);
+			if (saved) await noteSteersDurable(chatId, saved.messages);
 			const owned = fire.filter((entry) => s.queues.get(chatId)?.includes(entry));
 			if (status === 403 || status === 409) {
 				for (const entry of owned) { entry.waking = false; entry.wakeAgent = undefined; }
@@ -594,7 +645,7 @@ async function pump(chatId: string): Promise<void> {
 			for (const entry of owned) {
 				if (status === 200 && !jobIdOf(entry.steer)) {
 					// Preserve the non-job probe handoff's acceptance semantics.
-					completeEntry(chatId, entry);
+					await completeEntry(chatId, entry);
 				} else if (status !== 200 || !isTurnRunning(chatId)) {
 					deferOrReject(chatId, entry, new Error(`wake turn did not persist steer (status ${status})`));
 				}
@@ -602,6 +653,9 @@ async function pump(chatId: string): Promise<void> {
 				// or settlement. HTTP 200 alone is not a durable marker receipt.
 			}
 		}
+	} catch (error) {
+		parked = true;
+		console.error(`[chat ${chatId}] delivery paused after storage failure:`, error);
 	} finally {
 		s.pumping.delete(chatId);
 		// A steer may have arrived between the last check and the finally —
@@ -609,7 +663,7 @@ async function pump(chatId: string): Promise<void> {
 		// a live run are NOT stragglers (settleSteers owns their resurrection)
 		// — restarting for them would just park in waitForIdle forever.
 		const q = state().queues.get(chatId) ?? [];
-		if (!parked && automaticFollowUpAllowed(chatId, state().liveAgents.get(chatId)) && q.some((e) => e.handedTo === undefined && !e.waking && !e.deferred)) void pump(chatId);
+		if (!isStorageStopping() && !parked && q.some((e) => e.handedTo === undefined && !e.waking && !e.deferred)) void pump(chatId);
 	}
 }
 
@@ -617,9 +671,10 @@ async function pump(chatId: string): Promise<void> {
 // No retry timer, inference, or API-key fallback is started while consent is off.
 state().stopConnectionWatch?.();
 state().stopConnectionWatch = onSubscriptionChange(() => {
+	if (isStorageStopping()) return;
 	const s = state();
 	for (const [chatId, agent] of s.liveAgents) {
-		if (!isSubscriptionProvider(agent.state?.model?.provider) || automaticFollowUpAllowed(chatId, agent)) continue;
+		if (!isSubscriptionProvider(agent.state?.model?.provider) || automaticLiveFollowUpAllowed(agent)) continue;
 		const consumed = new Set(agent.state.messages.map((m) => (m as { id?: string }).id));
 		const pending = (s.queues.get(chatId) ?? []).filter((entry) => entry.handedTo === agent && !consumed.has(entry.steer.id));
 		if (pending.length === 0) continue;
@@ -629,7 +684,7 @@ state().stopConnectionWatch = onSubscriptionChange(() => {
 		handOffEligible(chatId, agent); // only unconsumed learner input; never replay consumed steers
 	}
 	for (const chatId of s.queues.keys()) {
-		if (automaticFollowUpAllowed(chatId, s.liveAgents.get(chatId))) void pump(chatId);
+		void pump(chatId);
 	}
 });
 
@@ -646,13 +701,17 @@ function deferOrReject(chatId: string, entry: QueuedSteer, error: Error): void {
 }
 
 /** Acknowledge session delivery without changing the worker outcome. */
-function finalizeJob(jobId: string): void {
+function finalizeJob(jobId: string): Promise<void> {
+	return trackWakeWrite(() => persistDeliveryReceipt(jobId));
+}
+
+async function persistDeliveryReceipt(jobId: string): Promise<void> {
 	try {
-		let job = stores.jobStore.getJob(jobId);
+		let job = await stores.jobStore.getJob(jobId);
 		if (!job) return;
-		if (!job.delivery) job = normalizeLegacyResult(job);
+		if (!job.delivery) job = await normalizeLegacyResult(job);
 		if (job.delivery?.status !== "pending") return;
-		stores.jobStore.updateJob(jobId, { delivery: { ...job.delivery, status: "delivered" } });
+		await stores.jobStore.updateJob(jobId, { delivery: { ...job.delivery, status: "delivered" } });
 	} catch (error) {
 		// The conversation is already durable. A bookkeeping failure must
 		// never replay that marker or turn a successful worker into a failure.
@@ -660,28 +719,35 @@ function finalizeJob(jobId: string): void {
 	}
 }
 
-function normalizeLegacyResult(job: JobRecord): JobRecord {
+async function normalizeLegacyResult(job: JobRecord): Promise<JobRecord> {
 	if (job.delivery || job.status !== "running" || !job.result) return job;
 	const failed = isSubagentFailure(job.kind, job.result as never);
-	return stores.jobStore.updateJob(job.id, {
+	return (await stores.jobStore.updateJob(job.id, {
 		status: failed ? "error" : "done", activity: failed ? "failed" : "finished",
 		delivery: { kind: "result", status: "pending" },
-	}) ?? job;
+	})) ?? job;
 }
 
 /** Restore known obligations only; old terminal records are never replayed. */
-function restorePendingDeliveries(chatId: string): void {
-	const record = stores.chatStore.getChat(chatId);
-	if (!record) return;
-	noteSteersDurable(chatId, record.messages);
-	for (const stored of stores.jobStore.listJobs(chatId)) {
-		const job = isJobLive(stored.id) ? stored : normalizeLegacyResult(stored);
+function restorePendingDeliveries(chatId: string, defer = false): Promise<void> {
+	return trackWakeWrite(() => restoreDeliveries(chatId, defer));
+}
+
+async function restoreDeliveries(chatId: string, defer: boolean): Promise<void> {
+	const record = await stores.chatStore.getChat(chatId);
+	if (!record || record.deleting) return;
+	await noteSteersDurable(chatId, record.messages);
+	for (const stored of await stores.jobStore.listJobs(chatId)) {
+		const job = isJobLive(stored.id) ? stored : await normalizeLegacyResult(stored);
 		if (job.delivery?.status !== "pending") continue;
 		const steer = job.delivery.kind === "abort" ? buildAbortSteer(job)
 			: job.result ? buildSubagentSteer(job, job.result as never) : undefined;
 		if (!steer) continue;
-		if (steerDelivered(record.messages, steer.id)) finalizeSteer(steer);
-		else queueSteer(chatId, steer);
+		if (steerDelivered(record.messages, steer.id)) await finalizeSteer(steer);
+		else {
+			const entry = queueSteer(chatId, steer);
+			if (defer) entry.deferred = true;
+		}
 	}
 }
 
@@ -693,16 +759,16 @@ function restorePendingDeliveries(chatId: string): void {
  * the steer fires right after their answer turn completes.
  */
 async function waitForIdle(chatId: string): Promise<void> {
-	for (;;) {
-		const record = stores.chatStore.getChat(chatId);
-		if (!record || !(state().queues.get(chatId) ?? []).some((entry) => !entry.waking && !entry.deferred && !entry.handedTo)) return;
+	while (!isStorageStopping()) {
+		const record = await stores.chatStore.getChat(chatId);
+		if (!record || record.deleting || !(state().queues.get(chatId) ?? []).some((entry) => !entry.waking && !entry.deferred && !entry.handedTo)) return;
 		const blocked = isTurnRunning(chatId) || danglingQuestionOf(record.messages) !== null;
 		if (!blocked) {
 			await delay(GRACE_MS);
-			const recheck = stores.chatStore.getChat(chatId);
+			const recheck = await stores.chatStore.getChat(chatId);
 			if (
 				!isTurnRunning(chatId) &&
-				recheck &&
+				recheck && !recheck.deleting &&
 				danglingQuestionOf(recheck.messages) === null
 			) {
 				return;
@@ -731,26 +797,42 @@ const SWEEP_THROTTLE_MS = 30_000;
  */
 /** Re-run a job's sub-agent loop — exposed for the sweep's tests (the
  *  /api/jobs poll is its only production caller, disabled under NODE_ENV=test). */
-export function recoverStaleJobs(): void {
+export function recoverStaleJobs(): Promise<void> {
+	return trackWakeWrite(recoverJobs);
+}
+
+async function recoverJobs(): Promise<void> {
+	if (isStorageStopping()) return;
 	const s = state();
 	const now = Date.now();
 	if (now - s.lastSweepAt < SWEEP_THROTTLE_MS) return;
 	s.lastSweepAt = now;
 	try {
-		for (const chat of stores.chatStore.listChats()) {
-			for (const job of stores.jobStore.listJobs(chat.id)) {
+		for (const chat of await stores.chatStore.listChats()) {
+			for (const job of await stores.jobStore.listJobs(chat.id)) {
+				if (isStorageStopping()) return;
 				if (isJobLive(job.id)) continue; // never re-run beside live computation
-				if (!stores.chatStore.getChat(job.chatId)) continue;
+				const owner = await stores.chatStore.getChat(job.chatId);
+				if (!owner || owner.deleting) continue;
 				if (isTurnRunning(job.chatId)) continue;
-				const recovered = normalizeLegacyResult(job);
+				const recovered = await normalizeLegacyResult(job);
 				if (recovered.delivery?.status === "pending") {
-					restorePendingDeliveries(job.chatId);
-					void pump(job.chatId);
+					await restorePendingDeliveries(job.chatId, storageMode() === "any");
+					if (storageMode() !== "any") void pump(job.chatId);
 				} else if (job.status === "running" && !job.result) {
-					// The sub-agent loop itself died with the process: re-spawn.
-					if (!s.respawn) continue;
-					stores.jobStore.updateJob(job.id, { activity: "recovering: re-running" });
-					s.respawn(job.id);
+					// Any Preview never repeats a model request after process death.
+					if (storageMode() === "any") {
+						await withChatWrite(job.chatId, async () => {
+							const latest = await stores.jobStore.getJob(job.id);
+							if (!latest || latest.status !== "running" || latest.result || isJobLive(job.id)) return;
+							await stores.jobStore.updateJob(job.id, { status: "error", activity: "interrupted", error: "The application stopped before this job finished. Start it again explicitly." });
+						});
+						continue;
+					}
+					// The original file application retains its established recovery policy.
+					if (!s.respawn || isStorageStopping()) continue;
+					await stores.jobStore.updateJob(job.id, { activity: "recovering: re-running" });
+					if (!isStorageStopping()) s.respawn(job.id);
 				}
 			}
 		}
@@ -760,7 +842,7 @@ export function recoverStaleJobs(): void {
 }
 
 /** The /api/jobs entry: job list for the client poll (+ lazy recovery). */
-export function listJobs(chatId: string): JobRecord[] {
-	if (process.env.NODE_ENV !== "test") recoverStaleJobs();
+export async function listJobs(chatId: string): Promise<JobRecord[]> {
+	if (process.env.NODE_ENV !== "test") await recoverStaleJobs();
 	return stores.jobStore.listJobs(chatId);
 }

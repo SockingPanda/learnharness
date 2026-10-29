@@ -25,7 +25,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ModelRole } from "../../../config.ts";
 import { ROLE_SLOT, modelsNotConfigured, type ModelSlotName, type ProviderKeyMissing } from "../../core/settings.ts";
-import type { ChatStore, JobStore } from "../../core/ports.ts";
+import type { ChatStore, JobPatch, JobStore } from "../../core/ports.ts";
+import { withChatWrite } from "../../core/storage-coordination.ts";
+import { isStorageStopping, StorageStoppingError } from "../../core/storage-lifecycle.ts";
 import { runDemoBuilder } from "./demo-builder.ts";
 import { runPdfReaderAgent } from "./pdf-reader.ts";
 import { runResearcherAgent } from "./researcher.ts";
@@ -65,8 +67,8 @@ export const pdfModelOverride: { current?: PiEngine } = {};
 type JobToolInput = ResearchToolInput | DemoToolInput | VisualToolInput | PdfToolInput;
 
 export interface JobRunnerDeps {
-	chatStore: ChatStore;
-	jobStore: JobStore;
+	chatStore: Pick<ChatStore, "getChat">;
+	jobStore: Pick<JobStore, "getJob" | "updateJob">;
 	/**
 	 * Hand a finished job's steer to the session delivery registry. The
 	 * promise tracks durable marker acceptance, but the worker never waits
@@ -114,6 +116,8 @@ interface LoopContext {
 	chatId?: string;
 	/** Fold one model call's usage into the job record (progress write). */
 	onUsage: (step: UsageStepLike) => void;
+	/** Model observers are synchronous; their writes are queued and flushed. */
+	onActivity: (line: string) => void;
 }
 
 /** The kind→role table (model slots wave, 2026-09-20): which ModelRole's
@@ -125,15 +129,32 @@ const KIND_ROLE: Record<JobKind, ModelRole> = {
 	pdf: "pdfReader",
 };
 
+const ACTIVE_RUNS = Symbol.for("lh.jobs.runner.active");
+const runnerGlobal = globalThis as typeof globalThis & { [ACTIVE_RUNS]?: Map<string, Promise<void>> };
+const activeRuns = runnerGlobal[ACTIVE_RUNS] ??= new Map<string, Promise<void>>();
+
+/** Includes workers waiting on their first store read, before abort registration. */
+export function activeJobIds(): string[] { return [...activeRuns.keys()]; }
+
+/** Abort signals do not prove that final usage/result writes have finished. */
+export async function awaitJobRunners(): Promise<void> {
+	while (activeRuns.size > 0) await Promise.allSettled([...activeRuns.values()]);
+}
+
+class JobPersistenceError extends Error {
+	constructor(cause: unknown) { super("The job outcome could not be saved.", { cause }); }
+}
+
 export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 	const { chatStore, jobStore, deliver } = deps;
 
 	/** Running usage totals per live job (the loop's onUsage folds here,
 	 * then writes through the job store so the poll sees progress). */
 	const usageTotals = new Map<string, JobUsage>();
+	const progress = new Map<string, { flush(): Promise<void> }>();
 
-	function makeLoopContext(jobId: string, engine: PiEngine): LoopContext {
-		const chatId = jobStore.getJob(jobId)?.chatId;
+	function makeLoopContext(job: JobRecord, engine: PiEngine): LoopContext {
+		const { id: jobId, chatId } = job;
 		// Provider-qualified stamp: the engine's actual model — the only
 		// thing that ran (BYOK: no config-pin fallback stamps exist).
 		const model = `${engine.model.provider}:${engine.model.id}`;
@@ -142,23 +163,45 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 		// signal rides into every model call of the loop.
 		const controller = new AbortController();
 		registerJobAbort(jobId, controller);
+		if (job.usage) usageTotals.set(jobId, job.usage);
+		let pending = Promise.resolve();
+		let failure: Error | undefined;
+		const enqueue = (patch: JobPatch) => {
+			pending = pending.then(async () => {
+				if (failure) return;
+				await withChatWrite(chatId, async () => {
+					const chat = await chatStore.getChat(chatId);
+					const current = await jobStore.getJob(jobId);
+					if (!chat || chat.deleting || !current) { controller.abort(); return; }
+					// Aborts retain billed usage but own their terminal activity.
+					if (current.status !== "running" && !patch.usage) return;
+					await jobStore.updateJob(jobId, patch);
+				});
+			}).catch((error: unknown) => { failure ??= error instanceof Error ? error : new Error("Job progress could not be saved", { cause: error }); controller.abort(failure); });
+		};
+		progress.set(jobId, { flush: async () => { await pending; if (failure) throw failure; } });
 		return {
 			abortSignal: controller.signal,
 			chatId,
 			onUsage: (step) => {
 				const next = accumulateJobUsage(usageTotals.get(jobId), model, step);
 				usageTotals.set(jobId, next);
-				jobStore.updateJob(jobId, { usage: next }); // merge patch — status untouched
+				enqueue({ usage: next }); // merge patch — status untouched
 			},
+			onActivity: (activity) => enqueue({ activity }),
 		};
 	}
 
-	/** True while the job may still write terminal state (result, error,
-	 * steer). False once abortJob has flipped it to error ("Aborted by learner") —
-	 * the runner then unwinds silently; the abort path owns the record and
-	 * the abort steer. */
-	function stillRunning(jobId: string): boolean {
-		return jobStore.getJob(jobId)?.status === "running";
+	/** Read/check/write under the same gate as abort and session deletion. */
+	async function updateRunning(jobId: string, patch: JobPatch): Promise<JobRecord | null> {
+		const known = await jobStore.getJob(jobId);
+		if (!known) return null;
+		return withChatWrite(known.chatId, async () => {
+			const chat = await chatStore.getChat(known.chatId);
+			const current = await jobStore.getJob(jobId);
+			if (!chat || chat.deleting || !current || current.status !== "running") return null;
+			return jobStore.updateJob(jobId, patch);
+		});
 	}
 
 	/** The kind→runner map: one sub-agent loop per kind. Each kind's
@@ -189,7 +232,19 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 	};
 
 	async function runJob(jobId: string, input?: JobToolInput): Promise<void> {
-		const job = jobStore.getJob(jobId);
+		if (isStorageStopping() || activeRuns.has(jobId)) return;
+		// Register before the first asynchronous store operation can begin.
+		const running = Promise.resolve().then(() => executeJob(jobId, input)).catch((error: unknown) => {
+			console.error(`[job ${jobId}] could not complete the persisted job:`, error);
+		}).finally(() => { if (activeRuns.get(jobId) === running) activeRuns.delete(jobId); });
+		activeRuns.set(jobId, running);
+		await running;
+	}
+
+	async function executeJob(jobId: string, input?: JobToolInput): Promise<void> {
+		if (isStorageStopping()) return;
+		const job = await jobStore.getJob(jobId);
+		if (isStorageStopping()) return;
 		if (!job) {
 			console.error(`[job ${jobId}] not found — nothing to run`);
 			return;
@@ -198,7 +253,7 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 		const run = KIND_RUNNERS[job.kind];
 		if (!run) {
 			console.error(`[job ${jobId}] unknown kind: ${job.kind}`);
-			jobStore.updateJob(jobId, { status: "error", error: `unknown kind ${job.kind}`, activity: "failed" });
+			await updateRunning(jobId, { status: "error", error: `unknown kind ${job.kind}`, activity: "failed" });
 			return;
 		}
 		const engine = pickEngine(job.kind);
@@ -211,8 +266,8 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 		// pipeline resumes the lesson and the teacher reads the refusal
 		// instead of waiting forever on a job it already dispatched.
 		const refuse = async (reason: string): Promise<void> => {
-			if (stillRunning(jobId)) jobStore.updateJob(jobId, { error: reason });
-			const resolved = resolveInput(job, input) as
+			await updateRunning(jobId, { error: reason });
+			const resolved = await resolveInput(job, input) as
 				| ResearchToolInput
 				| DemoToolInput
 				| VisualToolInput
@@ -258,29 +313,36 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 			await refuse(keyRefusal.error);
 			return;
 		}
+		if (isStorageStopping()) return;
+		const guardedEngine: PiEngine = {
+			...engine,
+			streamFn: (...args) => {
+				if (isStorageStopping()) throw new StorageStoppingError();
+				return engine.streamFn(...args);
+			},
+		};
 		try {
-			await run(jobId, engine, input, makeLoopContext(jobId, engine));
+			await run(jobId, guardedEngine, input, makeLoopContext(job, engine));
 		} finally {
-			unregisterJobAbort(jobId);
-			// The last usage write may have been mid-flight when the loop died;
-			// persist what was folded (the abort path patches only status, so
-			// this never resurrects an aborted job — merge patch).
-			const usage = usageTotals.get(jobId);
-			if (usage) jobStore.updateJob(jobId, { usage });
-			usageTotals.delete(jobId);
+			try { await progress.get(jobId)?.flush(); }
+			finally {
+				unregisterJobAbort(jobId);
+				progress.delete(jobId);
+				usageTotals.delete(jobId);
+			}
 		}
 	}
 
 	/** Dispatch input wins, then the job's saved arguments. Legacy jobs
 	 * without saved input fall back to the durable transcript, which may
 	 * lack a call if the dispatching turn died before settlement. */
-	function resolveInput(
+	async function resolveInput(
 		job: JobRecord,
 		input: JobToolInput | undefined,
-	): JobToolInput | undefined {
+	): Promise<JobToolInput | undefined> {
 		if (input) return input;
 		if (job.input !== undefined) return job.input as JobToolInput;
-		const chat = chatStore.getChat(job.chatId);
+		const chat = await chatStore.getChat(job.chatId);
 		if (!chat) return undefined;
 		// Wave D: the record is native history — the scan reads the native
 		// assistant blocks directly (a toolCall's arguments are the input).
@@ -301,33 +363,46 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 	 * Worker liveness ends after cleanup, not after a lesson consumes the result.
 	 */
 	async function finishJob(jobId: string, result: ResearchResult | DemoResult | VisualResult | PdfResult): Promise<void> {
-		const job = jobStore.getJob(jobId);
-		if (!job) return;
-		// Aborted mid-run (abortJob flips the record before
-		// the loop unwinds): no result write, no steer — the abort path owns
-		// the record and queues the abort steer itself.
-		if (job.status !== "running") return;
-		const failed = isSubagentFailure(job.kind, result);
-		jobStore.updateJob(jobId, {
-			result,
-			status: failed ? "error" : "done",
-			activity: failed ? "failed" : "finished",
-			delivery: { kind: "result", status: "pending" },
-		});
+		let saved: JobRecord | null;
+		try {
+			await progress.get(jobId)?.flush();
+			const known = await jobStore.getJob(jobId);
+			if (!known) return;
+			saved = await withChatWrite(known.chatId, async () => {
+				const chat = await chatStore.getChat(known.chatId);
+				const job = await jobStore.getJob(jobId);
+				if (!chat || chat.deleting || !job || job.status !== "running") return null;
+				const failed = isSubagentFailure(job.kind, result);
+				return jobStore.updateJob(jobId, {
+					result,
+					status: failed ? "error" : "done",
+					activity: failed ? "failed" : "finished",
+					delivery: { kind: "result", status: "pending" },
+				});
+			});
+		} catch (error) { throw new JobPersistenceError(error); }
+		if (!saved) return;
 		// The saved result now belongs to the session. Do not keep the worker,
 		// abort registration, or temporary resources alive behind a question.
-		void deliver(buildSubagentSteer(job, result)).catch((err: unknown) => {
+		if (isStorageStopping()) return; // the durable pending obligation survives restart
+		void deliver(buildSubagentSteer(saved, result)).catch((err: unknown) => {
 			console.error(`[job ${jobId}] pending delivery:`, err);
 		});
 	}
 
 	/** Chat-record + input resolution shared by all three runners. */
-	function jobContext(jobId: string): { job: JobRecord; chatId: string } | null {
-		const job = jobStore.getJob(jobId);
-		if (!job || job.status !== "running") return null;
-		const chat = chatStore.getChat(job.chatId);
+	async function jobContext(jobId: string): Promise<{ job: JobRecord; chatId: string } | null> {
+		if (isStorageStopping()) return null;
+		const job = await jobStore.getJob(jobId);
+		if (isStorageStopping() || !job || job.status !== "running") return null;
+		const chat = await chatStore.getChat(job.chatId);
+		if (isStorageStopping()) return null;
+		if (chat?.deleting) return null;
 		if (!chat) {
-			jobStore.updateJob(jobId, { status: "error", error: `Chat not found: ${job.chatId}`, activity: "failed" });
+			await withChatWrite(job.chatId, async () => {
+				const current = await jobStore.getJob(jobId);
+				if (current?.status === "running") await jobStore.updateJob(jobId, { status: "error", error: `Chat not found: ${job.chatId}`, activity: "failed" });
+			});
 			return null;
 		}
 		return { job, chatId: job.chatId };
@@ -341,13 +416,13 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 		passedInput: JobToolInput | undefined,
 		loop: LoopContext,
 	): Promise<void> {
-		const ctx = jobContext(jobId);
+		const ctx = await jobContext(jobId);
 		if (!ctx) return;
 		const { job } = ctx;
 
-		const input = (passedInput ?? resolveInput(job, passedInput)) as ResearchToolInput | undefined;
+		const input = (passedInput ?? await resolveInput(job, passedInput)) as ResearchToolInput | undefined;
 		if (!(typeof input?.question === "string" && input.question.trim())) {
-			jobStore.updateJob(jobId, { error: "research question unavailable" });
+			await updateRunning(jobId, { error: "research question unavailable" });
 			await finishJob(jobId, { brief: "Research failed: the research question is unavailable.", sources: [] });
 			return;
 		}
@@ -369,7 +444,9 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 		const pdfDir = await fs.mkdtemp(path.join(os.tmpdir(), "lh-research-"));
 
 		try {
-			jobStore.updateJob(jobId, { activity: "researching" });
+			if (isStorageStopping() || loop.abortSignal.aborted) return;
+			if (!await updateRunning(jobId, { activity: "researching" })) return;
+			if (isStorageStopping() || loop.abortSignal.aborted) return;
 			const brief = await runResearcherAgent(prompt, {
 				engine: model,
 				search: deps.searchProvider,
@@ -384,7 +461,7 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 					if (typeof input?.url === "string" && (toolName === "web_fetch" || toolName === "web_fetch_pdf")) {
 						fetchedUrls.push(input.url);
 					}
-					jobStore.updateJob(jobId, { activity: activityLine(toolName, input) });
+					loop.onActivity(activityLine(toolName, input));
 				},
 			});
 			if (!brief.trim()) throw new Error("the researcher produced no text");
@@ -394,9 +471,11 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 			// Real-kill abort (2026-09): the abort path flipped the record and
 			// queued the abort steer — unwind silently, keep the usage
 			// folded so far (flushed by runJob's finally).
+			if (err instanceof JobPersistenceError) throw err;
+			if (err instanceof StorageStoppingError) return;
 			if (loop.abortSignal.aborted) return;
 			const reason = err instanceof Error ? err.message : String(err);
-			if (stillRunning(jobId)) jobStore.updateJob(jobId, { error: reason });
+			await updateRunning(jobId, { error: reason });
 			await finishJob(jobId, { brief: `Research failed: ${reason}`, sources: [] });
 		} finally {
 			await fs.rm(pdfDir, { recursive: true, force: true });
@@ -411,16 +490,18 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 		passedInput: JobToolInput | undefined,
 		loop: LoopContext,
 	): Promise<void> {
-		const ctx = jobContext(jobId);
+		const ctx = await jobContext(jobId);
 		if (!ctx) return;
 		const { job } = ctx;
 
-		const input = (passedInput ?? resolveInput(job, passedInput)) as DemoToolInput | undefined;
+		const input = (passedInput ?? await resolveInput(job, passedInput)) as DemoToolInput | undefined;
 		const title = typeof input?.title === "string" && input.title.trim() ? input.title : "Interactive demo";
 		const brief = typeof input?.brief === "string" ? input.brief : "";
 
 		try {
-			jobStore.updateJob(jobId, { activity: "building demo" });
+			if (isStorageStopping() || loop.abortSignal.aborted) return;
+			if (!await updateRunning(jobId, { activity: "building demo" })) return;
+			if (isStorageStopping() || loop.abortSignal.aborted) return;
 			const result = await runDemoBuilder(
 				{ title, brief },
 				{
@@ -428,16 +509,18 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 					abortSignal: loop.abortSignal,
 					chatId: loop.chatId,
 					onUsage: (usage) => loop.onUsage(piUsageToStep(usage)),
-					onActivity: (line) => jobStore.updateJob(jobId, { activity: line }),
+					onActivity: loop.onActivity,
 				},
 			);
-			if (isDemoFailure(result) && stillRunning(jobId))
-				jobStore.updateJob(jobId, { error: result.notes ?? "demo build failed" });
+			if (isDemoFailure(result))
+				await updateRunning(jobId, { error: result.notes ?? "demo build failed" });
 			await finishJob(jobId, result);
 		} catch (err) {
+			if (err instanceof JobPersistenceError) throw err;
+			if (err instanceof StorageStoppingError) return;
 			if (loop.abortSignal.aborted) return;
 			const reason = err instanceof Error ? err.message : String(err);
-			if (stillRunning(jobId)) jobStore.updateJob(jobId, { error: reason });
+			await updateRunning(jobId, { error: reason });
 			await finishJob(jobId, { title, html: "", tested: true, notes: `FAILED: ${reason}` });
 		}
 	}
@@ -448,15 +531,17 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 		passedInput: JobToolInput | undefined,
 		loop: LoopContext,
 	): Promise<void> {
-		const ctx = jobContext(jobId);
+		const ctx = await jobContext(jobId);
 		if (!ctx) return;
 		const { job } = ctx;
 
-		const input = (passedInput ?? resolveInput(job, passedInput)) as VisualToolInput | undefined;
+		const input = (passedInput ?? await resolveInput(job, passedInput)) as VisualToolInput | undefined;
 		const brief = typeof input?.brief === "string" ? input.brief : "";
 
 		try {
-			jobStore.updateJob(jobId, { activity: "drawing figure" });
+			if (isStorageStopping() || loop.abortSignal.aborted) return;
+			if (!await updateRunning(jobId, { activity: "drawing figure" })) return;
+			if (isStorageStopping() || loop.abortSignal.aborted) return;
 			const result = await runVisualMaker(
 				{ brief },
 				{
@@ -464,16 +549,18 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 					abortSignal: loop.abortSignal,
 					chatId: loop.chatId,
 					onUsage: (usage) => loop.onUsage(piUsageToStep(usage)),
-					onActivity: (line) => jobStore.updateJob(jobId, { activity: line }),
+					onActivity: loop.onActivity,
 				},
 			);
-			if (isVisualFailure(result) && stillRunning(jobId))
-				jobStore.updateJob(jobId, { error: result.notes ?? "visual build failed" });
+			if (isVisualFailure(result))
+				await updateRunning(jobId, { error: result.notes ?? "visual build failed" });
 			await finishJob(jobId, result);
 		} catch (err) {
+			if (err instanceof JobPersistenceError) throw err;
+			if (err instanceof StorageStoppingError) return;
 			if (loop.abortSignal.aborted) return;
 			const reason = err instanceof Error ? err.message : String(err);
-			if (stillRunning(jobId)) jobStore.updateJob(jobId, { error: reason });
+			await updateRunning(jobId, { error: reason });
 			await finishJob(jobId, { svg: "", notes: `FAILED: ${reason}` });
 		}
 	}
@@ -486,16 +573,18 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 		passedInput: JobToolInput | undefined,
 		loop: LoopContext,
 	): Promise<void> {
-		const ctx = jobContext(jobId);
+		const ctx = await jobContext(jobId);
 		if (!ctx) return;
 		const { job } = ctx;
 
-		const input = (passedInput ?? resolveInput(job, passedInput)) as PdfToolInput | undefined;
+		const input = (passedInput ?? await resolveInput(job, passedInput)) as PdfToolInput | undefined;
 		const path = typeof input?.path === "string" && input.path.trim() ? input.path.trim() : "";
 		const question = typeof input?.question === "string" ? input.question : "";
 
 		try {
-			jobStore.updateJob(jobId, { activity: "reading pdf" });
+			if (isStorageStopping() || loop.abortSignal.aborted) return;
+			if (!await updateRunning(jobId, { activity: "reading pdf" })) return;
+			if (isStorageStopping() || loop.abortSignal.aborted) return;
 			const result = await runPdfReaderAgent(
 				{ path, question },
 			{
@@ -503,16 +592,18 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 				abortSignal: loop.abortSignal,
 				chatId: loop.chatId,
 				onUsage: (usage) => loop.onUsage(piUsageToStep(usage)),
-				onActivity: (line) => jobStore.updateJob(jobId, { activity: line }),
+				onActivity: loop.onActivity,
 			},
 			);
-			if (isPdfFailure(result) && stillRunning(jobId))
-				jobStore.updateJob(jobId, { error: result.brief.replace(/^PDF failed:\s*/i, "") });
+			if (isPdfFailure(result))
+				await updateRunning(jobId, { error: result.brief.replace(/^PDF failed:\s*/i, "") });
 			await finishJob(jobId, result);
 		} catch (err) {
+			if (err instanceof JobPersistenceError) throw err;
+			if (err instanceof StorageStoppingError) return;
 			if (loop.abortSignal.aborted) return;
 			const reason = err instanceof Error ? err.message : String(err);
-			if (stillRunning(jobId)) jobStore.updateJob(jobId, { error: reason });
+			await updateRunning(jobId, { error: reason });
 			await finishJob(jobId, { path, question, brief: `PDF failed: ${reason}`, pagesRead: [], pagesConsulted: [] });
 		}
 	}

@@ -39,11 +39,11 @@ after(() => {
 for (const revokedAfterQueue of [false, true]) {
 	test(`mixed learner+automatic batch: foreground runs, automatic result stays owned/deferred without consent (${revokedAfterQueue ? "revoked after handoff" : "initially off"})`, { timeout: 5000 }, async () => {
 		connection(revokedAfterQueue);
-		const chat = stores.chatStore.createChat("Scratch mixed queue");
-		stores.chatStore.saveSettings(chat.id, { model: { provider: "chatgpt", id: "gpt-5" } });
-		const job = stores.jobStore.createJob({ kind: "research", chatId: chat.id, toolCallId: "scratch-job-call" });
+		const chat = (await stores.chatStore.createChat("Scratch mixed queue"));
+		(await stores.chatStore.saveSettings(chat.id, { model: { provider: "chatgpt", id: "gpt-5" } }));
+		const job = (await stores.jobStore.createJob({ kind: "research", chatId: chat.id, toolCallId: "scratch-job-call" }));
 		const result = { brief: "Scratch completed job result", sources: [] };
-		stores.jobStore.updateJob(job.id, { status: "done", result, delivery: { kind: "result", status: "pending" } });
+		(await stores.jobStore.updateJob(job.id, { status: "done", result, delivery: { kind: "result", status: "pending" } }));
 		const marker = buildSubagentSteer(job, result);
 		const contexts: string[] = [];
 		const native = piModels().getModel("openai", "gpt-5")!;
@@ -61,11 +61,11 @@ for (const revokedAfterQueue of [false, true]) {
 		setTurnRunner(async (chatId, input) => {
 			wakes++;
 			assert.equal(input.type, "steers");
-			if (input.type === "steers") stores.chatStore.saveMessages(chatId, [...stores.chatStore.getChat(chatId)!.messages, ...input.steers]);
+			if (input.type === "steers") (await stores.chatStore.saveMessages(chatId, [...(await stores.chatStore.getChat(chatId))!.messages, ...input.steers]));
 			return 200;
 		});
 		assert(beginTurn(chat.id));
-		registerLiveAgent(chat.id, agent);
+		(await registerLiveAgent(chat.id, agent));
 		const delivered = deliverJobResult(marker);
 		const learner = { id: "scratch-live-learner", role: "user", content: "Please continue my learning", timestamp: 3 } as never;
 		assert(steerLiveChat(chat.id, learner));
@@ -79,16 +79,16 @@ for (const revokedAfterQueue of [false, true]) {
 		// reset/replay a learner steer that the agent has already consumed.
 		ipc({ channel: "lh:chatgpt", id: "ordinary-reply-with-no-pending-call", value: { accessToken: "scratch-only" } });
 		assert(!agent.hasQueuedMessages());
-		const persisted = persistTurn(stores.chatStore, chat.id, 0, agent.state.messages, false);
+		const persisted = (await persistTurn(stores.chatStore, chat.id, 0, agent.state.messages, false));
 		unregisterLiveAgent(chat.id); endTurn(chat.id); settleSteers(chat.id, persisted);
 		await new Promise((resolve) => setImmediate(resolve));
 		assert.equal(wakes, 0, "no background spin or spend while consent is absent");
-		assert.equal(stores.jobStore.getJob(job.id)!.delivery?.status, "pending", "delivery ownership must not be finalized or failed by deferral");
-		assert.equal(stores.jobStore.getJob(job.id)!.status, "done", "worker completion is independent of consent deferral");
-		assert.deepEqual(stores.jobStore.getJob(job.id)!.result, result);
+		assert.equal((await stores.jobStore.getJob(job.id))!.delivery?.status, "pending", "delivery ownership must not be finalized or failed by deferral");
+		assert.equal((await stores.jobStore.getJob(job.id))!.status, "done", "worker completion is independent of consent deferral");
+		assert.deepEqual((await stores.jobStore.getJob(job.id))!.result, result);
 		connection(true);
 		await delivered;
 		assert.equal(wakes, 1, "explicit consent resumes the preserved result exactly once");
-		assert.equal(stores.jobStore.getJob(job.id)!.status, "done");
+		assert.equal((await stores.jobStore.getJob(job.id))!.status, "done");
 	});
 }
