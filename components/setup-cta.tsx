@@ -1,4 +1,6 @@
 "use client";
+
+import { useI18n } from "@/components/i18n";
 /**
  * The zero-keys surfaces (zero-keys wave, 2026-09-25, owner-locked over
  * Platform's 66dbea9 key-presence gate): when NO model-provider key
@@ -79,6 +81,7 @@ export function useZeroKeys(): boolean {
  *  chain's copy. testid "setup-cta-keys" (the models CTA keeps
  *  "setup-cta"; probes can tell them apart). */
 export function ZeroKeysPill({ onOpen, inline = false }: { onOpen: () => void; inline?: boolean }) {
+	const { t } = useI18n();
 	const button = (
 		<button
 			type="button"
@@ -86,7 +89,7 @@ export function ZeroKeysPill({ onOpen, inline = false }: { onOpen: () => void; i
 			onClick={onOpen}
 			className="rounded-sm border border-border bg-card px-3 py-1.5 font-ui text-xs text-foreground transition-colors hover:border-muted-foreground/50 hover:bg-accent cursor-pointer"
 		>
-			Add a provider key
+			{t("Add a provider key")}
 		</button>
 	);
 	return inline ? button : <div className="pointer-events-auto mb-2 flex justify-center">{button}</div>;

@@ -9,6 +9,7 @@
  * control together) and the control itself locks — the row owns the dim.
  */
 
+import { useI18n } from "@/components/i18n";
 import { useState, type ComponentPropsWithRef, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
 
@@ -113,6 +114,7 @@ export function Toggle({
 	label,
 	discIcon,
 	title,
+	ariaLabel,
 }: {
 	checked: boolean;
 	disabled?: boolean;
@@ -123,15 +125,18 @@ export function Toggle({
 	 *  toggle renders the half-filled contrast circle AS the disc — the icon
 	 *  carries the meaning; plain toggles keep the plain disc. */
 	discIcon?: ReactNode;
+	/** Localized accessible name; the source label keeps the stable test id. */
+	ariaLabel?: string;
 	/** Optional native tooltip on the switch. */
 	title?: string;
 }) {
+	const { t } = useI18n();
 	return (
 		<button
 			type="button"
 			role="switch"
 			aria-checked={checked}
-			aria-label={label}
+			aria-label={ariaLabel ?? t(label)}
 			{...(title ? { title } : {})}
 			disabled={disabled}
 			data-testid={`toggle-${label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`}

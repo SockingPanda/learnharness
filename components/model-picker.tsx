@@ -1,7 +1,9 @@
 "use client";
 
+import { useI18n } from "@/components/i18n";
+
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ChatSettings, ModelCatalogEntry, ModelCatalogResponse, ModelsSettings, UserSettings } from "@/src/core";
+import type { ChatSettings, ModelCatalogEntry, ModelCatalogResponse, ModelsSettings, Translator, UserSettings } from "@/src/core";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { prettyModel } from "@/components/usage-format";
 import { ModelMenuList, ThinkingMenuList } from "@/components/settings/model-menu";
@@ -21,6 +23,11 @@ export function catalogLimits(catalog: Pick<ModelCatalogResponse, "models">): Ma
 	return new Map(catalog.models.flatMap((m) => m.contextWindow === null ? [] : [[`${m.provider}:${m.id}`, m.contextWindow] as const]));
 }
 
+function modelErrorLabel(error: string, t: Translator): string {
+	const status = /^settings rejected \((\d+)\)$/.exec(error)?.[1];
+	return status ? t("settings rejected ({status})", { status }) : t(error);
+}
+
 /**
  * THE CONVERSATION MODEL CONTROL — dual-bound (owner, per-session models,
  * 2026-09-28). WITH a chatId (the in-session stats bar): the pills bind
@@ -38,6 +45,7 @@ export function catalogLimits(catalog: Pick<ModelCatalogResponse, "models">): Ma
  * no-factory-fallback language: the UI never presents a default model).
  */
 export function ModelControl({ chatId, onModelChange }: { chatId?: string; onModelChange?: (model: string | undefined) => void }) {
+	const { t } = useI18n();
 	const { catalog, refresh } = useModelCatalog();
 	const [models, setModels] = useState<ModelsSettings | undefined>();
 	// A successful read with no settings is a legacy session; undefined
@@ -275,7 +283,7 @@ export function ModelControl({ chatId, onModelChange }: { chatId?: string; onMod
 	return (
 		<div ref={containerRef} className="relative flex items-center gap-1.5" data-testid="model-control">
 			<Hint
-				label={effectiveId ? `${effectiveProvider ? `${effectiveProvider}:` : ""}${effectiveId}` : "Model selector"}
+				label={effectiveId ? `${effectiveProvider ? `${effectiveProvider}:` : ""}${effectiveId}` : t("Model selector")}
 				action="open-model-picker"
 				side="bottom"
 			>
@@ -298,7 +306,7 @@ export function ModelControl({ chatId, onModelChange }: { chatId?: string; onMod
 				// "Thinking" + its real shortcut via the registry (owner interlude
 				// 2026-09-25): ⇧⇥ cycles the level, so "Thinking (⇧⇥)" —
 				// rebind-live like every Hint suffix.
-				label="Thinking"
+				label={t("Thinking")}
 				action="cycle-thinking"
 				side="bottom"
 			>
@@ -321,7 +329,7 @@ export function ModelControl({ chatId, onModelChange }: { chatId?: string; onMod
 				{/* Just the level — the button reads like the model button reads
 				   the model name (owner, stats-control round 1). */}
 				<span className="text-card-foreground">
-					{effectiveLevel === undefined ? "—" : (THINKING_LABEL[effectiveLevel] ?? effectiveLevel)}
+					{effectiveLevel === undefined ? "—" : t(THINKING_LABEL[effectiveLevel] ?? effectiveLevel)}
 				</span>
 				<span aria-hidden className="text-xs text-muted-foreground">▾</span>
 			</button>
@@ -337,7 +345,7 @@ export function ModelControl({ chatId, onModelChange }: { chatId?: string; onMod
 					preferredSide="up"
 					menuClass="flex w-[22rem] flex-col rounded-xl border bg-card p-2 text-xs shadow-xl"
 				>
-					{error && <div className="mb-1.5 text-destructive">{error}</div>}
+					{error && <div className="mb-1.5 text-destructive">{modelErrorLabel(error, t)}</div>}
 					<ModelMenuList
 						models={catalog?.models}
 						effectiveId={effectiveId}
@@ -345,10 +353,10 @@ export function ModelControl({ chatId, onModelChange }: { chatId?: string; onMod
 						onPick={pickModel}
 						footer={
 							catalog && catalog.models.length === 0
-								? "No models — add a provider key in Keys"
+								? t("No models — add a provider key in Keys")
 								: chatId
-									? "This session's model"
-									: "Strong tier — the default for new sessions"
+									? t("This session's model")
+									: t("Strong tier — the default for new sessions")
 						}
 					/>
 				</MenuShell>
@@ -365,10 +373,10 @@ export function ModelControl({ chatId, onModelChange }: { chatId?: string; onMod
 						levels={catalog ? levels : []}
 						effectiveLevel={effectiveLevel}
 						onPick={(level) => apply(effectiveProvider ?? "", effectiveId ?? "", level as ThinkingLevel)}
-						empty={catalog ? (effectiveId ? `${prettyModel(effectiveId)} has no thinking levels.` : "Pick a model first.") : "Loading…"}
-						footer="Levels this model actually supports"
+						empty={catalog ? (effectiveId ? t("{model} has no thinking levels.", { model: prettyModel(effectiveId) }) : t("Pick a model first.")) : t("Loading…")}
+						footer={t("Levels this model actually supports")}
 					/>
-					{error && <div className="mt-1 text-destructive">{error}</div>}
+					{error && <div className="mt-1 text-destructive">{modelErrorLabel(error, t)}</div>}
 				</MenuShell>
 			)}
 		</div>

@@ -1,4 +1,6 @@
 "use client";
+import { useI18n } from "@/components/i18n";
+import { createTranslator, type Translator } from "@/src/core";
 
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -44,13 +46,15 @@ export function useUpdateState() {
 	return { state, failed };
 }
 
-export function updateStatusText(state: UpdateState | null): string | null {
+export function updateStatusText(state: UpdateState | null, t: Translator = createTranslator("en")): string | null {
 	switch (state?.status) {
-		case "checking": return "Checking for updates…";
-		case "downloading": return state.version ? `Downloading version ${state.version}…` : "Downloading an update…";
-		case "up-to-date": return "No newer version was found at the last check.";
-		case "downloaded": return `${state.version ? `Version ${state.version}` : "An update"} is ready. It will install when you quit the app.`;
-		case "error": return UPDATE_ERROR;
+		case "checking": return t("Checking for updates…");
+		case "downloading": return state.version ? t("Downloading version {version}…", { version: state.version }) : t("Downloading an update…");
+		case "up-to-date": return t("No newer version was found at the last check.");
+		case "downloaded": return state.version
+			? t("Version {version} is ready. It will install when you quit the app.", { version: state.version })
+			: t("An update is ready. It will install when you quit the app.");
+		case "error": return t(UPDATE_ERROR);
 		default: return null;
 	}
 }
@@ -68,13 +72,14 @@ export function UpdateSettings({
 	version?: string;
 	homepage?: string;
 }) {
+	const { t } = useI18n();
 	const { state, failed } = useUpdateState();
 	const [checkFailed, setCheckFailed] = useState(false);
 	useEffect(() => setCheckFailed(false), [state]);
 	const active = state !== null && state.status !== "disabled";
 	const busy = state?.status === "checking" || state?.status === "downloading";
-	const status = state?.status === "downloaded" ? updateStatusText(state)
-		: failed || checkFailed ? UPDATE_ERROR : updateStatusText(state);
+	const status = state?.status === "downloaded" ? updateStatusText(state, t)
+		: failed || checkFailed ? t(UPDATE_ERROR) : updateStatusText(state, t);
 	const releaseNotes = version && homepage ? `${homepage}/releases/tag/v${version}` : null;
 	const check = () => {
 		setCheckFailed(false);
@@ -84,27 +89,25 @@ export function UpdateSettings({
 	return (
 		<>
 			<SettingsRow
-				label={`Version ${version || "unknown"}`}
+				label={t("Version {version}", { version: version || t("unknown") })}
 				testid="row-version"
 				hint={
 					<>
 						{status && <span className="block" role="status" data-testid="update-status">{status}</span>}
-						{active && <span className="block">{MANUAL_UPDATE_HINT}</span>}
-						{releaseNotes && <a href={releaseNotes} target="_blank" rel="noopener noreferrer" className="underline-offset-2 hover:text-foreground hover:underline" data-testid="release-notes">Release notes</a>}
+						{active && <span className="block">{t(MANUAL_UPDATE_HINT)}</span>}
+						{releaseNotes && <a href={releaseNotes} target="_blank" rel="noopener noreferrer" className="underline-offset-2 hover:text-foreground hover:underline" data-testid="release-notes">{t("Release notes")}</a>}
 					</>
 				}
 			>
 				{active && (state.status === "downloaded" ? (
-					<Button type="button" size="xs" className="cursor-pointer" data-testid="update-restart" onClick={() => window.lh?.installUpdate?.()}>Restart</Button>
+					<Button type="button" size="xs" className="cursor-pointer" data-testid="update-restart" onClick={() => window.lh?.installUpdate?.()}>{t("Restart")}</Button>
 				) : (
 					<Button type="button" size="xs" variant="outline" className="cursor-pointer disabled:cursor-not-allowed" data-testid="update-check" disabled={busy} aria-busy={busy} onClick={check}>
-						{busy && <BrailleSpinner label={state.status === "downloading" ? "Downloading update" : "Checking for updates"} />}
-						Check for updates
-					</Button>
+						{busy && <BrailleSpinner label={state.status === "downloading" ? t("Downloading update") : t("Checking for updates")} />}{t("Check for updates")}</Button>
 				))}
 			</SettingsRow>
 			{active && (
-				<SettingsRow label="Automatic updates" hint={AUTO_UPDATE_HINT} testid="row-auto-update">
+				<SettingsRow label={t("Automatic updates")} hint={t(AUTO_UPDATE_HINT)} testid="row-auto-update">
 					<Toggle checked={autoUpdate} label="auto update" onChange={onAutoUpdateChange} />
 				</SettingsRow>
 			)}

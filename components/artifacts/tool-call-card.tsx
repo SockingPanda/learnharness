@@ -1,7 +1,9 @@
 "use client";
 
+import { useI18n } from "@/components/i18n";
+
 import { ChevronRight } from "lucide-react";
-import type { ArtifactPartProps } from "@/src/core";
+import { type ArtifactPartProps, createTranslator, type Translator } from "@/src/core";
 
 /**
  * The generic tool-call card (sources v1, 2026-09-19): a quiet, collapsed
@@ -45,14 +47,14 @@ function headlineArg(tool: string, input: unknown): string {
 /** Render a tool result body: plain strings verbatim, image-bearing read
  *  results show their text + an attachment note (the image itself is the
  *  model's — the learner sees only that it happened). */
-function outputText(output: unknown): string | null {
+function outputText(output: unknown, t: Translator = createTranslator("en")): string | null {
 	if (output == null) return null;
 	if (typeof output === "string") return output;
 	if (typeof output === "object" && "text" in (output as Record<string, unknown>)) {
 		const o = output as { text?: unknown; images?: unknown[] };
 		const text = typeof o.text === "string" ? o.text : null;
 		const n = Array.isArray(o.images) ? o.images.length : 0;
-		return n > 0 ? `${text ?? ""}\n[${n} image${n > 1 ? "s" : ""} attached to the model]`.trim() : text;
+		return n > 0 ? `${text ?? ""}\n${t(n === 1 ? "[{count} image attached to the model]" : "[{count} images attached to the model]", { count: n })}`.trim() : text;
 	}
 	try {
 		return JSON.stringify(output, null, 2);
@@ -62,10 +64,11 @@ function outputText(output: unknown): string | null {
 }
 
 export function ToolCallCard({ part }: ArtifactPartProps) {
+	const { t } = useI18n();
 	const p = part as ToolCallPart;
 	const tool = p.type.replace(/^tool-/, "");
 	const arg = headlineArg(tool, p.input);
-	const out = outputText(p.output);
+	const out = outputText(p.output, t);
 	const failed = p.state === "output-error" || typeof p.errorText === "string";
 	return (
 		<details
@@ -84,7 +87,7 @@ export function ToolCallCard({ part }: ArtifactPartProps) {
 				{p.input != null && (
 					<div>
 						<div className="mb-1 font-medium uppercase tracking-wide text-muted-foreground">
-							Input
+							{t("Input")}
 						</div>
 						<pre className="max-h-32 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px] leading-relaxed">
 							{JSON.stringify(p.input, null, 2)}
@@ -94,7 +97,7 @@ export function ToolCallCard({ part }: ArtifactPartProps) {
 				{typeof p.errorText === "string" ? (
 					<div>
 						<div className="mb-1 font-medium uppercase tracking-wide text-muted-foreground">
-							Error
+							{t("Error")}
 						</div>
 						<pre className="whitespace-pre-wrap break-all font-mono text-[11px] text-red-500">
 							{p.errorText}
@@ -103,7 +106,7 @@ export function ToolCallCard({ part }: ArtifactPartProps) {
 				) : out != null ? (
 					<div>
 						<div className="mb-1 font-medium uppercase tracking-wide text-muted-foreground">
-							Output
+							{t("Output")}
 						</div>
 						<pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px] leading-relaxed">
 							{out}
@@ -111,7 +114,7 @@ export function ToolCallCard({ part }: ArtifactPartProps) {
 					</div>
 				) : (
 					p.state !== "output-available" && (
-						<div className="text-muted-foreground italic">running…</div>
+						<div className="text-muted-foreground italic">{t("running…")}</div>
 					)
 				)}
 			</div>

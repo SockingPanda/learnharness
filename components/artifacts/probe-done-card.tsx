@@ -1,5 +1,7 @@
 "use client";
 
+import { useI18n } from "@/components/i18n";
+
 import { ClipboardCheckIcon } from "lucide-react";
 import { parseProbeDoneInput, type ProbeDoneResult } from "@/src/core";
 
@@ -22,6 +24,7 @@ import { parseProbeDoneInput, type ProbeDoneResult } from "@/src/core";
  * the UI wave; this card just guarantees the data is never invisible.
  */
 export function ProbeDoneCard({ part }: { part: { input?: unknown; output?: unknown; state?: unknown } }) {
+	const { t } = useI18n();
 	const output = part.output as ProbeDoneResult | undefined;
 	const state = typeof part.state === "string" ? part.state : "";
 
@@ -43,13 +46,13 @@ export function ProbeDoneCard({ part }: { part: { input?: unknown; output?: unkn
 		<div data-testid="probe-done-card" className="my-3 rounded-xl border bg-card/60 p-3">
 			<div className="mb-2 flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
 				<ClipboardCheckIcon className="size-3.5 text-primary" />
-				Probe concluded — your assessment
+				{t("Probe concluded — your assessment")}
 			</div>
 			{output && !output.ok ? (
-				<p className="text-sm text-muted-foreground">The prober retried: {output.error}</p>
+				<p className="text-sm text-muted-foreground">{t("The prober retried: {error}", { error: output.error ?? "" })}</p>
 			) : state === "output-error" ? (
 				<p className="text-sm text-muted-foreground">
-					The assessment was malformed — the prober retried with a corrected one.
+					{t("The assessment was malformed — the prober retried with a corrected one.")}
 				</p>
 			) : strands ? (
 				<div className="space-y-2">
@@ -64,7 +67,7 @@ export function ProbeDoneCard({ part }: { part: { input?: unknown; output?: unkn
 					)}
 				</div>
 			) : (
-				<p className="text-sm text-muted-foreground">Writing the assessment…</p>
+				<p className="text-sm text-muted-foreground">{t("Writing the assessment…")}</p>
 			)}
 		</div>
 	);

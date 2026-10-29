@@ -53,6 +53,8 @@ Add your provider API key and choose your models, then start a session with what
 
 All three platforms support in-app updates.
 
+**Interface language:** English and Simplified Chinese are available under **Settings → General → Interface language** (设置 → 通用 → 界面语言). The default follows your browser or system language. Your choice applies immediately and is remembered on this device. AI replies and dictation keep their existing language behavior.
+
 **Dictation:** Create a [Deepgram API key](https://console.deepgram.com/) with the **Member role or higher** ([required for token minting](https://developers.deepgram.com/reference/auth/tokens/grant)) and add it under **Settings → Providers → Dictation**. Choose the language below the key; **Multilingual** supports automatic recognition and mixed-language speech. A `403 Insufficient permissions` error during token minting can indicate an insufficient key role.
 
 ## Your keys, your data
@@ -71,6 +73,8 @@ npm test           # deterministic, no LLM, no network
 ```
 
 See the [development guide](docs/development.md), [architecture](docs/architecture.md), and [desktop release guide](docs/desktop-release.md).
+
+For UI translations and adding locales, see [internationalization](docs/i18n.md).
 
 Questions, bug reports, and feature requests: [GitHub Issues](https://github.com/amosblomqvist/learnharness/issues).
 
