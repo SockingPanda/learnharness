@@ -7,6 +7,9 @@
  * message triggers nothing. "Covered" is by construction exactly "what
  * the extractor saw": the fingerprint (sha256 of a message's view lines)
  * and the extractor's prompt share ONE selection — the teacher prose.
+ * Reading opts into a distinct view that also includes actual learner
+ * messages and personal-note events. Its unread article snapshot, route
+ * and navigation controls never become knowledge just by being loaded.
  *
  * A per-chat append-only ledger records which messages have been
  * extracted by CONTENT FINGERPRINT; "uncovered" is DERIVED at read time
@@ -23,6 +26,7 @@ import { createHash } from "node:crypto";
 
 import type { CoverageEntry } from "./contracts/graph.ts";
 import { failedOutputCallIds, userFacingTextOf, type LhMessage } from "./native-messages.ts";
+import { learnerReadingText, readingEventOf } from "./reading.ts";
 
 export type { CoverageEntry };
 
@@ -39,8 +43,15 @@ export function messageViewLines(
 	message: LhMessage,
 	mid: string,
 	failedOutputCalls: ReadonlySet<string> = failedOutputCallIds([message]),
+	reading = false,
 ): string[] {
 	const lines: string[] = [];
+	if (reading) {
+		const learner = learnerReadingText(message).trim();
+		if (learner) return [`LEARNER [${mid}] ${learner}`];
+		const event = readingEventOf(message);
+		if (event?.kind === "note") return [`PERSONAL RECORD [${mid}] ${JSON.stringify(event.note)}`];
+	}
 	if ((message as { role?: string }).role !== "assistant") return lines;
 	for (const text of userFacingTextOf((message as { content: unknown }).content, failedOutputCalls)) {
 		lines.push(`TEACHER [${mid}] ${text.trim()}`);
@@ -74,9 +85,9 @@ export function viewTokens(lines: string[]): number {
  * teacher prose, with the message id as the tag). Changes exactly when
  * the teacher prose of the message changes — nothing else can re-open it.
  */
-export function messageFingerprint(message: LhMessage, failedOutputCalls?: ReadonlySet<string>): string {
+export function messageFingerprint(message: LhMessage, failedOutputCalls?: ReadonlySet<string>, reading = false): string {
 	const h = createHash("sha256");
-	h.update(JSON.stringify([(message as { role?: string }).role, messageViewLines(message, message.id, failedOutputCalls)]));
+	h.update(JSON.stringify([(message as { role?: string }).role, messageViewLines(message, message.id, failedOutputCalls, reading)]));
 	return h.digest("hex");
 }
 
@@ -89,12 +100,12 @@ export interface CoverageSlot {
 
 /** Fingerprint a whole transcript, in order (used by the trigger, the run,
  *  and the coverage view — one derivation everywhere). */
-export function coverageSlots(messages: ReadonlyArray<LhMessage>): CoverageSlot[] {
+export function coverageSlots(messages: ReadonlyArray<LhMessage>, reading = false): CoverageSlot[] {
 	const failedOutputCalls = failedOutputCallIds(messages);
 	return messages.map((message) => ({
 		message,
-		fp: messageFingerprint(message, failedOutputCalls),
-		tokens: viewTokens(messageViewLines(message, message.id, failedOutputCalls)),
+		fp: messageFingerprint(message, failedOutputCalls, reading),
+		tokens: viewTokens(messageViewLines(message, message.id, failedOutputCalls, reading)),
 	}));
 }
 
@@ -116,6 +127,7 @@ export function coverageOf(
 	messages: ReadonlyArray<LhMessage>,
 	entries: ReadonlyArray<CoverageEntry>,
 	chatId: string,
+	reading = false,
 ): {
 	slots: CoverageSlot[];
 	uncovered: number[];
@@ -125,7 +137,7 @@ export function coverageOf(
 	uncoveredCount: number;
 } {
 	const covered = coveredSet(entries, chatId);
-	const slots = coverageSlots(messages);
+	const slots = coverageSlots(messages, reading);
 	const uncovered: number[] = [];
 	let coveredTokens = 0;
 	let uncoveredTokens = 0;

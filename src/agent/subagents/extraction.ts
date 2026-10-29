@@ -120,7 +120,7 @@ import { runSubmitAgent, healStringifiedArrays } from "./submit-agent.ts";
  *  passages labeled with their message ids (2026-10-13).
  */
 export function transcriptView(record: ChatRecord): string {
-	return proseView(record.messages, record.title);
+	return proseView(record.messages, record.title, undefined, record.kind === "reading");
 }
 
 /** The extraction view under the teacher-prose ruling (owner, 2026-09-28):
@@ -136,8 +136,9 @@ function proseView(
 	messages: ReadonlyArray<LhMessage>,
 	title?: string,
 	failedOutputCalls: ReadonlySet<string> = failedOutputCallIds(messages),
+	reading = false,
 ): string {
-	const lines = messages.flatMap((message) => messageViewLines(message, message.id, failedOutputCalls));
+	const lines = messages.flatMap((message) => messageViewLines(message, message.id, failedOutputCalls, reading));
 	const head = title && title.length > 0 ? `# ${title}\n\n` : "";
 	return head + lines.join("\n\n");
 }
@@ -433,6 +434,16 @@ propositions list alone. Include every field even when empty — "chains": [] wh
 arguments. The tool's field descriptions carry the details.`;
 
 export const EXTRACTOR_INSTRUCTIONS = `${SESSION_PREAMBLE}\n\n${EXTRACTION_CORE}\n\n${SESSION_MESSAGE_ID_RULE}`;
+export const READING_EXTRACTOR_INSTRUCTIONS = `You extract supported knowledge from a guided reading conversation.
+TEACHER passages are the guide's explanations; LEARNER passages are the learner's own words.
+PERSONAL RECORD entries distinguish expressed understanding, discoveries and unresolved questions.
+Preserve attribution and scope: an author's experiment or opinion is not a universal fact.
+Questions, tentative hypotheses, analogies and comprehension claims are NOT established propositions.
+Only extract supported factual ideas and genuine reasoning. Never turn a reading-order link,
+discussion branch, personal-note reference or thematic similarity into logical implication.
+The learner's insights are eligible when the conversation actually establishes them; never
+ascribe the guide's words to the learner. Retain the passage id that supports the proposition.
+\n${EXTRACTION_CORE}\n\n${SESSION_MESSAGE_ID_RULE}`;
 export const NOTES_EXTRACTOR_INSTRUCTIONS = `${NOTES_PREAMBLE}\n\n${EXTRACTION_CORE}`;
 
 // ── the same-source digest (owner, 2026-09-30 evening) ──
@@ -475,6 +486,7 @@ function runExtractor(
 	batchIds: ReadonlySet<string>,
 	signal: AbortSignal | undefined,
 	onStep: (usage: Usage, model: string, step: number, finishReason: string, tools: string) => void,
+	reading = false,
 ): Promise<SessionFindings> {
 	// Chains in (the wire), chains out (the store) — no translation seam
 	// since chains-primary. Validation runs at the submit seam (error-back)
@@ -490,7 +502,7 @@ function runExtractor(
 		parameters: sessionFindingsSchema,
 		fill: fillFindings,
 		validate: (value) => validateSessionAnchors(value, batchIds) ?? validateFindingsChains(value, existingIds),
-		systemPrompt: EXTRACTOR_INSTRUCTIONS,
+		systemPrompt: reading ? READING_EXTRACTOR_INSTRUCTIONS : EXTRACTOR_INSTRUCTIONS,
 		prompt,
 		engine,
 		signal,
@@ -828,6 +840,9 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 	// single-flight guard. No module-level state left in this factory.
 	const runningExtractions = runs().running;
 	const inFlight = runs().inFlight;
+	// A short reading exchange can finish while the previous extraction is
+	// still running. Coalesce a follow-up instead of losing its final notes.
+	const readingFollowups = new Set<string>();
 
 	function setPhase(
 		jobKey: string,
@@ -915,6 +930,7 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 		sourceId: string,
 		view: string,
 		batchIds: ReadonlySet<string>,
+		reading = false,
 	): Promise<SessionFindings> {
 		const signal = runningExtractions.get(jobKey)?.controller.signal;
 		signal?.throwIfAborted(); // an abort during a sync gap ends the job here
@@ -944,6 +960,7 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 				recordStep(jobKey, "extractor", callUsage(usage), model);
 				console.info(`[extraction] extractor step ${step}: ${finishReason}, tools: ${tools}`);
 			},
+			reading,
 		);
 		console.info(`[extraction ${jobKey}] extractor done in ${Math.round(performance.now() - t0)}ms`);
 		return findings;
@@ -1098,8 +1115,13 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 	}
 
 	async function runExtraction(chatId: string): Promise<EmissionStats> {
-		if (inFlight.has(chatId)) return { nodes: 0, chains: 0 };
+		if (inFlight.has(chatId)) {
+			if (chatStore.getChat(chatId)?.kind === "reading") readingFollowups.add(chatId);
+			return { nodes: 0, chains: 0 };
+		}
 		inFlight.add(chatId);
+		let readingLength: number | null = null;
+		let wasAborted = false;
 		const t0 = performance.now();
 		// COVERAGE (vision-extraction-coverage.md, 2026-09-15): extract ONLY
 		// what the per-chat coverage ledger doesn't already hold — never the
@@ -1111,12 +1133,13 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 		try {
 			const record = chatStore.getChat(chatId);
 			if (!record) throw new Error(`Chat not found: ${chatId}`);
+			if (record.kind === "reading") readingLength = record.messages.length;
 			// BYOK per-need gate (owner, 2026-09-22) + key presence
 			// (2026-09-25): the write channel needs extractor + auditor
 			// engines AND their providers' keys; a refusal lands BEFORE any
 			// stage runs (typed — the trigger skips, routes surface 503).
 			refuseIfStagesUnready();
-			const covered = coverageOf(record.messages, graphStore.readCoverage(), chatId);
+			const covered = coverageOf(record.messages, graphStore.readCoverage(), chatId, record.kind === "reading");
 			const failedOutputCalls = failedOutputCallIds(record.messages);
 			if (covered.uncovered.length === 0) {
 				console.info(`[extraction ${chatId}] nothing uncovered — no-op`);
@@ -1153,19 +1176,19 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 							// fingerprints' messageViewLines ("TEACHER [id] text"), one
 							// shared seam.
 							const messages = batch.map((slot) => slot.message);
-							const view = proseView(messages, record.title, failedOutputCalls);
+							const view = proseView(messages, record.title, failedOutputCalls, record.kind === "reading");
 							// The batch's teacher-prose ids — the ONLY anchors this
 							// job's submit may name (validateSessionAnchors at the
 							// submit seam refuses anything else: ids from other
 							// batches — even real ones of this chat — other chats,
 							// and non-prose messages).
 							const batchIds = new Set(
-								messages.filter((m) => messageViewLines(m, m.id, failedOutputCalls).length > 0).map((m) => m.id),
+								messages.filter((m) => messageViewLines(m, m.id, failedOutputCalls, record.kind === "reading").length > 0).map((m) => m.id),
 							);
 							setPhase(jobKey, "queued", "chat", undefined, part);
 							const findings = await withExtractSlot(jobKey, async () => {
 								setPhase(jobKey, "extracting", "chat", undefined, part);
-								return extract(jobKey, chatId, view, batchIds);
+								return extract(jobKey, chatId, view, batchIds, record.kind === "reading");
 							});
 							// SERIALIZED AUDIT (owner, 2026-09-28): audit + merge are the
 							// graph-mutating critical section — one job at a time,
@@ -1208,6 +1231,7 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 					});
 				} catch (err) {
 					settled.push({ status: "rejected", reason: err });
+					if (err instanceof Error && err.name === "AbortError") wasAborted = true;
 					// A source-wide abort (user abort / session deletion)
 					// ends the WHOLE run: later batches would mint fresh,
 					// un-aborted jobs and hang — stop here. Isolated
@@ -1231,6 +1255,11 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 		} finally {
 			inFlight.delete(chatId);
 			finishExtraction(chatId); // done or failed — no longer running
+			const pending = readingFollowups.delete(chatId);
+			const fresh = pending && !wasAborted && readingLength !== null ? chatStore.getChat(chatId) : null;
+			if (fresh?.kind === "reading" && fresh.messages.length > readingLength!) {
+				void runExtraction(chatId).catch((error) => console.error(`[extraction ${chatId}] reading follow-up failed:`, error));
+			}
 		}
 	}
 

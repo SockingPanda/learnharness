@@ -101,6 +101,7 @@ function textPart(text: string): LhViewPart {
 
 /** The result a tool part should show, from a native toolResult. */
 function applyResult(part: LhViewPart, result: ToolResultMessage): void {
+	part.resultMessageId = (result as ToolResultMessage & { id?: string }).id;
 	if (result.isError) {
 		part.state = "output-error";
 		part.rawInput = part.input;
@@ -377,6 +378,10 @@ function applyResultTo(part: LhViewPart | undefined, result: ToolResultMessage):
 /** A marker's projected message (handoff/steers) or splice (plan block). */
 function projectMarker(marker: LhMarkerMessage, out: LhViewMessage[]): void {
 	switch (marker.customType) {
+		case "reading-navigation": {
+			out.push({ id: marker.id, role: "user", parts: [{ type: "data-reading-navigation", data: marker.details }] });
+			return;
+		}
 		case "graph-context": {
 			// The session's map context (owner, 2026-10-04): user-side —
 			// a minimal collapsible card ABOVE the first user message;

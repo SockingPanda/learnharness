@@ -37,6 +37,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, Message, ToolResultMessage, UserMessage } from "@earendil-works/pi-ai";
 import { QUESTION_TOOLS, type PendingQuestion } from "./pending.ts";
 import { CLAUDE_CODE_PROVIDER } from "./contracts/claude-code.ts";
+import type { ReadingNavigation } from "./reading.ts";
 import {
 	CONCLUDE_ACK_TEXT,
 	HANDOFF_TEXT,
@@ -74,6 +75,7 @@ export interface LhMarkerMessage {
 		| "plan-block"
 		| "practice-thinking"
 		| "practice-next"
+		| "reading-navigation"
 		| "problem-dismissed"
 		| "compaction";
 	/** The model-facing text ("" for plan blocks — UI-only). */
@@ -340,6 +342,22 @@ export function newNextMessage(): LhMarkerMessage {
 		details: {},
 		timestamp: Date.now(),
 	};
+}
+
+/** A clicked reading action is explicit learner input. Exact target ids
+ * reach the guide; the transcript shows the human label, never tool syntax. */
+export function newReadingNavigationMessage(navigation: ReadingNavigation, label: string): LhMarkerMessage {
+	const instructions = {
+		next: "Continue from the most recently explained passage; do not skip unread text.",
+		return: "Restore the saved article bookmark, connect the discussion to it, and do not advance yet.",
+		skip: "Record a skip of the current main node and resume at the next main node, if any.",
+		review: "Review the article and the learner's expressed discoveries and open questions.",
+		read: "Read from this exact main-route node.",
+		discuss: "Resume this exact discussion branch without moving the article bookmark.",
+	};
+	return { id: newMessageId(), role: "custom", customType: "reading-navigation", display: true,
+		content: `[READING NAVIGATION] ${JSON.stringify(navigation)}\n${instructions[navigation.action]}`,
+		details: { navigation, label }, timestamp: Date.now() };
 }
 
 /** The problem-dismissal marker (ask-style discard, owner 2026-10-04):
@@ -818,7 +836,7 @@ export function nativeInputCause(message: AgentMessage, history: readonly AgentM
 	if (message.role === "system" || message.role === "assistant") return "neutral";
 	if (message.role === "custom") {
 		if (["probe-handoff", "subagent-steer", "subagent-abort"].includes(message.customType)) return "automatic";
-		if (["practice-thinking", "practice-next"].includes(message.customType)) return "learner";
+		if (["practice-thinking", "practice-next", "reading-navigation"].includes(message.customType)) return "learner";
 		return ["graph-context", "plan-block", "problem-dismissed", "compaction"].includes(message.customType) ? "neutral" : "unrecognizable";
 	}
 	if (message.role === "toolResult") {

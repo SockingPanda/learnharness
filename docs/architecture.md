@@ -13,6 +13,15 @@ Status: **the canonical architecture spec** — describes the as-built system, v
 
 **The one-sentence model:** a pure domain core at the center; every external effect (fs, LLMs, browser, OS) behind an adapter at the edge; two composition roots as the only places the edges are plugged together; and every persistent store written by exactly one system.
 
+**Guided reading:** `kind: "reading"` selects an independent guide from the
+first turn. Its source snapshot, reading route, discussion branches, two positions
+and personal records are events in the native session log. It reuses the
+knowledge pipeline with a reading-specific extraction view, preserving learner
+contributions alongside guide prose. See [guided reading](reading.md) for the
+protocol, provenance rules and UI. Reading-route edges mean sequence/discussion;
+they never enter the global graph as logical implications. Chat writes now
+stamp schema v2; legacy records remain readable and graph ledgers remain v1.
+
 ---
 
 ## 1. Two axes, one law

@@ -46,9 +46,10 @@ const MIN_USEFUL_CONTENT = 200;
 
 const turndown = new TurndownService({ headingStyle: "atx", codeBlockStyle: "fenced" });
 
-function truncate(text: string): string {
-	if (text.length <= MAX_CONTENT_CHARS) return text;
-	return `${text.slice(0, MAX_CONTENT_CHARS)}\n\n[Truncated at ${MAX_CONTENT_CHARS} characters]`;
+function truncate(text: string, maxChars = MAX_CONTENT_CHARS, requireFull = false): string {
+	if (text.length <= maxChars) return text;
+	if (requireFull) throw new Error(`The article exceeds ${maxChars} characters. Use a shorter article or section; no partial source was saved.`);
+	return `${text.slice(0, maxChars)}\n\n[Truncated at ${maxChars} characters]`;
 }
 
 /** Jina Reader fallback for JS-rendered pages (no deps — plain fetch). */
@@ -71,8 +72,12 @@ async function fetchViaJina(url: string): Promise<string | null> {
 	}
 }
 
-function htmlToMarkdown(html: string): { title: string; content: string } | null {
+function htmlToMarkdown(html: string, baseUrl?: string): { title: string; content: string } | null {
 	const { document } = parseHTML(html);
+	if (baseUrl) for (const el of document.querySelectorAll("a[href], img[src]")) {
+		const attribute = el.tagName === "IMG" ? "src" : "href";
+		try { el.setAttribute(attribute, new URL(el.getAttribute(attribute)!, baseUrl).href); } catch { /* preserve invalid source links */ }
+	}
 	const article = new Readability(document as unknown as Document).parse();
 	if (!article?.content) return null;
 	const markdown = turndown.turndown(article.content);
@@ -80,14 +85,15 @@ function htmlToMarkdown(html: string): { title: string; content: string } | null
 	return { title: article.title ?? "", content: markdown };
 }
 
-async function fetchAndExtract(url: string): Promise<string> {
+export async function fetchAndExtract(url: string, options: { maxChars?: number; requireFull?: boolean; signal?: AbortSignal } = {}): Promise<string> {
+	const limit = (text: string) => truncate(text, options.maxChars, options.requireFull);
 	const resp = await fetch(url, {
 		headers: {
 			"User-Agent": USER_AGENT,
 			Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 			"Accept-Language": "en-US,en;q=0.9",
 		},
-		signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+		signal: options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(FETCH_TIMEOUT_MS)]) : AbortSignal.timeout(FETCH_TIMEOUT_MS),
 	});
 	if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
 
@@ -109,16 +115,16 @@ async function fetchAndExtract(url: string): Promise<string> {
 	if (length > MAX_RESPONSE_BYTES) throw new Error("Response too large");
 
 	const text = await resp.text();
-	if (!contentType.includes("html")) return `${sourceLine}\n\n${truncate(text)}`; // plain text / markdown / code
+	if (!contentType.includes("html")) return `${sourceLine}\n\n${limit(text)}`; // plain text / markdown / code
 
-	const extracted = htmlToMarkdown(text);
+	const extracted = htmlToMarkdown(text, resp.url || url);
 	if (extracted) {
 		const header = extracted.title ? `# ${extracted.title}\n\n${sourceLine}\n\n---\n\n` : `${sourceLine}\n\n---\n\n`;
-		return header + truncate(extracted.content);
+		return header + limit(extracted.content);
 	}
 	// Readability failed — likely JS-rendered. Try Jina Reader.
 	const jina = await fetchViaJina(url);
-	if (jina) return truncate(jina);
+	if (jina) return limit(jina);
 	throw new Error("Could not extract readable content (the page may be JavaScript-rendered)");
 }
 

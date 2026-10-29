@@ -35,6 +35,14 @@ The agent can also research questions in the background, create visual explanati
 
 ## Knowledge that carries forward
 
+**Guided reading:** choose **带读** in the sidebar and paste an article URL.
+The guide reads the article first, then accompanies you through it in Chinese.
+Ask questions or explore a tangent at any point; the article bookmark stays
+put. **阅读路线与记录** shows the reading route, discussion branches, your
+expressed discoveries and open questions, with the corresponding original
+passages available on demand. Reading contributes to the same knowledge graph
+as teaching, including connections to ideas from earlier sessions.
+
 What you are taught accumulates as propositions and reasoning chains: individual claims and the premises that lead to them. The graph shows this structure, with links back to the source sessions. You can also import notes.
 
 Future teaching sessions can read the graph instead of starting from scratch. Practice sessions can draw their material from it. It stores the ideas and their connections, not ratings of your ability.

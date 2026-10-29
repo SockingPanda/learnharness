@@ -25,5 +25,6 @@ export async function GET() {
 	return Response.json({
 		prober: effectivePromptSegments("prober", switches),
 		teacher: effectivePromptSegments("teacher", switches),
+		reading: effectivePromptSegments("reading", switches),
 	});
 }

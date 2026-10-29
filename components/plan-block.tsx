@@ -80,6 +80,7 @@ export function estimateLineWidth(line: string): number {
 		if (NARROW_CHARS.has(ch)) w += 3.1;
 		else if (WIDE_CHARS.has(ch)) w += 9.2;
 		else if (CAP_DIGIT.test(ch)) w += 6.0;
+		else if ((ch.codePointAt(0) ?? 0) >= 0x2e80) w += 11;
 		else w += 5.4;
 	}
 	return w;
@@ -482,9 +483,11 @@ export function PlanDiagram({
 	naturalSize,
 	monochrome,
 	fill,
+	bookmarkId,
+	onSelectNode,
 }: {
 	nodes: readonly LayoutNode[];
-	edges: ReadonlyArray<{ from: string; to: string }>;
+	edges: ReadonlyArray<{ from: string; to: string; discussion?: boolean }>;
 	statusOf: (id: string) => PlanNodeStatus;
 	glowId?: string | null;
 	markerId: string;
@@ -508,6 +511,8 @@ export function PlanDiagram({
 	 *  dock band's marginalia mode, where the diagram must fit BOTH the
 	 *  flank's width and the band's height rather than run width-first. */
 	fill?: boolean;
+	bookmarkId?: string | null;
+	onSelectNode?: (id: string) => void;
 }) {
 	const layout = useMemo(() => blockLayout(nodes, edges), [nodes, edges]);
 	// Pad only the full-extent render — the plan window's override viewBox is
@@ -606,6 +611,7 @@ export function PlanDiagram({
 						d={edgePathD(pts, target)}
 						className={dim ? "fill-none stroke-border" : "fill-none stroke-white"}
 						strokeWidth={STROKE_W}
+						strokeDasharray={e.discussion ? "5 4" : undefined}
 						markerEnd={`url(#${markerId}${dim ? "-dim" : ""})`}
 					/>
 				);
@@ -625,6 +631,12 @@ export function PlanDiagram({
 						transform={`translate(${layout.x.get(n.id) ?? 0}, ${layout.y.get(n.id) ?? 0})`}
 						data-testid={`plan-node-${n.id}`}
 						data-status={status}
+						role={onSelectNode ? "button" : undefined}
+						tabIndex={onSelectNode ? 0 : undefined}
+						aria-label={onSelectNode ? n.title : undefined}
+						onClick={onSelectNode ? () => onSelectNode(n.id) : undefined}
+						onKeyDown={onSelectNode ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelectNode(n.id); } } : undefined}
+						className={onSelectNode ? "cursor-pointer outline-none focus:opacity-70" : undefined}
 					>
 						{/* Rectangular — no corner rounding (owner). */}
 						<rect
@@ -633,6 +645,7 @@ export function PlanDiagram({
 							className={monochrome ? MONO_BOX : BOX[status]}
 							strokeWidth={STROKE_W}
 						/>
+						{n.id === bookmarkId && <rect x={-4} y={-4} width={w + 8} height={h + 8} fill="none" className="stroke-sky-400" strokeWidth={1.5} data-testid="reading-bookmark" />}
 						{glow && (
 							// The current node's highlight: faint yellow, blurred so it
 							// bleeds over the edges — static, no pulse (owner, round 6).

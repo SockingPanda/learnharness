@@ -2,6 +2,9 @@
 
 import { createContext, Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useChatSession } from "@/components/session";
+import { ReadingToolbar, ReadingPanel } from "@/components/reading";
+import { readingStateOf } from "@/src/core";
+import type { ReadingNavigation } from "@/src/core";
 import { visibleQueuedSteers } from "@/components/session-core";
 import { SetupDialog } from "@/components/setup-dialog";
 import { Hint } from "@/components/ui/hint";
@@ -229,7 +232,7 @@ export function Chat({
 	/** The session kind (practice sessions, owner 2026-10-04): practice
 	 *  renders no phase chip (no probe→teach arc applies) and a Practice
 	 *  tag rides the header instead. */
-	kind?: "teach" | "practice";
+	kind?: "teach" | "practice" | "reading";
 	initialPrompt?: string;
 	/** A teacher turn is running server-side but attached to no client
 	 * (navigated away mid-turn, returned while in flight). */
@@ -874,6 +877,9 @@ export function Chat({
 	// The live plan popup (wave 4): opened by any transcript plan block, the
 	// top-bar plan chip, and the dock band's marginalia.
 	const [planOpen, setPlanOpen] = useState(false);
+	const [readingOpen, setReadingOpen] = useState(false);
+	const closeReading = useCallback(() => setReadingOpen(false), []);
+	const reading = useMemo(() => kind === "reading" ? readingStateOf(nativeMessages) : null, [kind, nativeMessages]);
 	// Real plan presence — gates the marginalia's clickable flank. A JSX
 	// element is always truthy; gating on the node alone mounted a phantom
 	// (invisible, clickable) button in the bottom-right whenever a question
@@ -1224,6 +1230,13 @@ export function Chat({
 		applyText("");
 		void send({ type: "text", text: t });
 	};
+	const navigateReading = (navigation: ReadingNavigation) => {
+		if (busy || compacting) return;
+		if (zeroKeys) { setSetupOpen(true); return; }
+		if (selectedModelUnavailable(catalog, selectedModel)) { openModelPicker(); return; }
+		draftRef.current = null;
+		void send({ type: "reading", ...navigation });
+	};
 
 	/* STEER VS SEND (owner arc 2026-10-03): a send while a turn runs steers
 	 * it — the quiet queue + the live agent's steering rail; the turn's own
@@ -1365,6 +1378,7 @@ export function Chat({
 						</button>
 </Hint>
 					)}
+					{reading && <button type="button" data-testid="reading-plan-chip" onClick={() => setReadingOpen(true)} className="lh-no-drag flex shrink-0 cursor-pointer items-center gap-1.5 rounded-full border border-border/80 px-2 py-0.5 text-xs text-muted-foreground hover:text-foreground">阅读路线与记录</button>}
 					{/* The extraction ring (owner-locked redesign, 2026-09-24): fills
 					    with uncovered vs the chunk threshold, pulses while a run is in
 					    flight, vanishes when the graph is off. Click → the exact
@@ -1385,7 +1399,7 @@ export function Chat({
 							<DumbbellIcon className="size-3" />
 							Practice
 						</span>
-					) : (
+					) : reading ? <span data-testid="phase-chip" data-phase="reading" className="shrink-0 text-xs text-muted-foreground">带读</span> : (
 						<PhaseChip phase={phases.at(-1) ?? "probe"} />
 					)}
 				</TopBar>
@@ -1398,8 +1412,8 @@ export function Chat({
 						<div data-session-find-root="" className={`${COLUMN} flex flex-1 flex-col gap-4 pt-4`}>
 							{messages.length === 0 && !busy && (
 								<ConversationEmptyState
-									title="New session"
-									description="The teacher will open by probing what you already know."
+									title={reading ? "一起读一篇文章" : "New session"}
+									description={reading ? "贴上文章链接，开始中文带读。随时提问，也能随时回到文章。" : "The teacher will open by probing what you already know."}
 								/>
 							)}
 
@@ -1432,6 +1446,8 @@ export function Chat({
 								<Fragment key={m.id || `m-${mi}`}>
 									{m.parts.map((part, pi) => {
 										switch (part.type) {
+											case "data-reading-navigation":
+												return <div key={pi} className="my-3 text-xs text-muted-foreground">{(part.data as { label: string }).label}</div>;
 											case "data-graph-context":
 												return <GraphContextCard key={pi} data={part.data as GraphContextData} />;
 											case "data-compaction":
@@ -1497,6 +1513,7 @@ export function Chat({
 										    Rendered WITHOUT the Message wrapper — that is the bubble. */
 											<div
 										data-testid="user-message"
+										id={messageAnchorId(m.id)}
 										/* THE DOCUMENT, ALL-IN (owner rounds two+three, 2026-10-07):
 										    no chat side — the user message is a full-width card-color
 										    BAND, the IDENTICAL geometry as the thinking rows: 5px band
@@ -1700,7 +1717,9 @@ export function Chat({
 					dictationSlot={<DictationBar dictation={dictation} />}
 					dictationCancel={dictation.cancel}
 					queuedSteers={visibleQueuedSteers(steerQueue, nativeMessages)}
-					setupCta={
+					setupCta={<>
+						{reading && <ReadingToolbar state={reading} busy={busy || compacting || zeroKeys} onOpen={() => setReadingOpen(true)} onAction={navigateReading} />}
+						{
 						zeroKeys ? (
 							<ZeroKeysPill onOpen={() => setSetupOpen(true)} />
 						) : (
@@ -1717,7 +1736,7 @@ export function Chat({
 								</div>
 							)
 						)
-					}
+					}</>}
 					composer={
 						<Composer
 							// Stop aborts ANY in-flight turn (stream-reattach wave): the
@@ -1737,7 +1756,7 @@ export function Chat({
 							// applies.
 							nextProblem={nextReady}
 							onNext={sendNext}
-							placeholder={nextReady ? "Ask anything, or press Enter for the next one." : undefined}
+							placeholder={reading ? "随时提问、说说你的发现，或继续读文章……" : nextReady ? "Ask anything, or press Enter for the next one." : undefined}
 						/>
 					}
 					onSubmitAnswer={(output) => {
@@ -1774,6 +1793,7 @@ export function Chat({
 					/>
 				)}
 				{planOpen && <PlanPopup messages={messages} onClose={() => setPlanOpen(false)} />}
+				{readingOpen && reading && <ReadingPanel state={reading} messages={nativeMessages} chatId={chatId} busy={busy || compacting || zeroKeys} onClose={closeReading} onAction={navigateReading} />}
 				<AbortTurnDialog mode={abortAsk} onClose={() => setAbortAsk(null)} onConfirm={confirmAbort} busy={busy} />
 				</div>
 			</div>
