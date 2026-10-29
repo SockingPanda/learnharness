@@ -1,0 +1,33 @@
+app/api/models/route.ts
+  s_cc66c27d50dfb0::t_8738d18ec6273a 6-7
+electron/chatgpt-catalog.cjs
+  s_cc66c27d50dfb0::t_079767c4893ea3 1-13
+electron/chatgpt.cjs
+  s_cc66c27d50dfb0::t_fe2295bc4b9426 6,427-430
+src/agent/chatgpt-bridge.ts
+  s_cc66c27d50dfb0::t_92e543bcb5c7a4 3-4,9,115,127-128
+src/agent/chatgpt-models.ts
+  s_cc66c27d50dfb0::t_48d74f6b0d6940 1-43
+src/core/contracts/chatgpt.ts
+  s_cc66c27d50dfb0::t_6fae2c6e071895 28-37
+src/server/model-catalog.ts
+  s_cc66c27d50dfb0::t_34d7edfa68a803 189-191
+tests/chatgpt-models.test.ts
+  s_cc66c27d50dfb0::t_461677072c5908 1-48
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9319a738a5dcac2b2c52ae3437b3b98c9a43b06d",
+  "prompts": {},
+  "sessions": {
+    "s_cc66c27d50dfb0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a18751-22d4-70b1-b49a-93fdb0a09cdb",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Zebra Linux <q1033416242@gmail.com>"
+    }
+  }
+}
