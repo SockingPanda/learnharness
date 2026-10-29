@@ -175,7 +175,7 @@ export function DraftShell({
 								<ConversationEmptyState
 									title={t(mode === "reading" ? "Read an article together" : mode === "practice" ? "New practice session" : "New session")}
 									description={
-										mode === "reading" ? t("Paste an article link to start guided reading in Chinese. Ask questions, explore ideas, and return to the article at any time.") : mode === "practice"
+										mode === "reading" ? t("Paste an article or PDF link, or a local PDF path, to start guided reading in Chinese. Ask questions, explore ideas, and return to the article at any time.") : mode === "practice"
 											? t("Pick nodes from your knowledge graph, describe what you want to practice, or bring your own problem.")
 											: t("The teacher will open by probing what you already know.")
 									}
@@ -207,7 +207,7 @@ export function DraftShell({
 										// input (owner refinement round, 2026-09-24) — no lesson has
 										// started yet, so the composer must not read like one is in
 										// flight.
-										placeholder={t(mode === "reading" ? "Paste an article link and tell me what you want to focus on…" : mode === "practice" ? "What do you want to practice?" : "What do you want to learn?")}
+										placeholder={t(mode === "reading" ? "Paste an article or PDF link, or a local PDF path…" : mode === "practice" ? "What do you want to practice?" : "What do you want to learn?")}
 									/>
 								</div>
 								<StatsBar

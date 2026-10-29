@@ -15,6 +15,8 @@ process.env.LH_DATA_DIR = temp;
 process.env.OPENROUTER_API_KEY = "test-key-not-used-for-network";
 const { chatStore } = await import("../src/store/chats.ts");
 const { graphStore } = await import("../src/store/graph.ts");
+const { readingSourceStore } = await import("../src/store/reading-sources.ts");
+const { createReadingSourceLoader } = await import("../src/server/reading-sources.ts");
 const { createReadingAgent, composeInstructions } = await import("../src/agent/teacher-agent.ts");
 const { handleChatInput } = await import("../src/server/chat-handler.ts");
 const { runningTurn } = await import("../src/server/turn-runs.ts");
@@ -40,10 +42,14 @@ it("persists an independent reading session, resumes a detour, and connects its 
 	assert.equal(chatStore.getChat(id)?.kind, "reading");
 	chatStore.saveSettings(id, { model: { provider: "openrouter", id: "z-ai/glm-5.3-flash" } });
 	let fetches = 0;
+	const loadSource = createReadingSourceLoader(readingSourceStore, { chatStore, fetch: async () => {
+		fetches++;
+		return new Response(markdown, { headers: { "Content-Type": "text/markdown" } });
+	} });
 	const turn = async (text: string | ReadingNavigation, steps: FauxResponseStep[]) => {
 		const scripted = engine(steps);
 		const input = typeof text === "string" ? { type: "text" as const, text } : { type: "reading" as const, ...text };
-		const ack = await handleChatInput(id, input, (opts) => createReadingAgent({ chatId: id, chatStore, graphStore, fetchArticle: async () => { fetches++; return markdown; } }, { ...opts, engine: scripted }));
+		const ack = await handleChatInput(id, input, (opts) => createReadingAgent({ chatId: id, chatStore, graphStore, loadSource }, { ...opts, engine: scripted }));
 		assert.equal(ack.status, 200, await ack.clone().text());
 		const handle = runningTurn(id);
 		if (handle) await new Response(handle.subscribe()).text();
@@ -56,6 +62,7 @@ it("persists an independent reading session, resumes a detour, and connects its 
 		fauxAssistantMessage("我们先读固定基线这一段。固定比较对象有助于比较性能变化。"),
 	]);
 	assert.equal(fetches, 1);
+	assert.equal(readingSourceStore.get(id)?.archive.kind, "web");
 	const prompt = composeInstructions("reading");
 	assert.match(prompt, /primarily in Chinese/);
 	assert.ok(!prompt.includes("Check that the step landed"));

@@ -35,11 +35,11 @@ describe("guided reading with interface localization", () => {
 		const draft = <DraftShell mode="reading" busy={false} text="Settings" onChange={() => {}} onSend={() => {}} />;
 		const english = render("en", draft);
 		assert.match(english, /Read an article together/);
-		assert.match(english, /Paste an article link and tell me what you want to focus on…/);
+		assert.match(english, /Paste an article or PDF link, or a local PDF path…/);
 		assert.match(english, /start guided reading in Chinese/);
 		const chinese = render("zh-CN", draft);
 		assert.match(chinese, /一起读一篇文章/);
-		assert.match(chinese, /贴上文章链接，也可以说说你想重点读什么……/);
+		assert.match(chinese, /贴上文章或 PDF 链接，也可以输入本地 PDF 路径……/);
 		for (const html of [english, chinese]) {
 			assert.equal(parseHTML(html).document.querySelector('[role="textbox"]')?.textContent, "Settings");
 		}

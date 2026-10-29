@@ -1,12 +1,39 @@
 # Guided reading
 
-Choose **Reading / 带读** in the sidebar, paste a web article URL and send. The existing
+Choose **Reading / 带读** in the sidebar, paste a web article/PDF URL or a local PDF
+path and send. Desktop file-path dropping uses the existing composer flow. The existing
 per-session model and provider setup powers the guide. There is no preliminary
 probe, mandatory quiz or plan-acceptance gate. Chinese explanations follow the
 article's argument; each passage's original is collapsed beside its explanation.
-The first version accepts HTTP(S) web articles, up to 200,000 extracted characters.
-Fetch errors and oversized sources are reported rather than saved as a partial
-article. The original snapshot is reused for the life of the session.
+HTTP(S) web articles support up to 200,000 extracted characters. PDF originals
+are limited to 25 MB; readable text is extracted for every page, up to 200,000
+characters. No OCR or visual interpretation is performed by this text loader.
+If any PDF page has no text layer (including a blank page), or full extraction
+fails, the original PDF remains saved and downloadable, but no partial reading
+route is created. Fetch failures are reported. The original snapshot is reused
+for the life of the session.
+
+## Original-source files
+
+Sources are stored under `LH_DATA_DIR/reading-sources/<chatId>/` (repository
+`data/reading-sources/` when `LH_DATA_DIR` is unset):
+
+- Web pages: `source.md`, with the original URL in `source_url` frontmatter,
+  plus `metadata.json` retaining the original URL, redirect destination,
+  save time, content size and SHA-256. The Markdown contains the extracted
+  article body, not the entire website HTML; linked images remain links.
+- PDFs: `source.pdf` preserves the exact original bytes. `metadata.json`
+  retains the original URL or local path and the same integrity metadata.
+  Page text is a derived reading aid kept in the chat's source blocks, never
+  a replacement for the original PDF.
+
+The reading panel links to the original webpage and downloads the saved
+Markdown/PDF through `/api/chats/<chatId>/reading-source`. Local PDFs are
+downloaded from the saved copy even if the original file has moved. Old web
+reading sessions can download a Markdown archive made from their existing
+saved blocks; the website is not fetched again. Existing archive files are
+immutable and integrity-checked. Deleting a session also removes its source
+archive. Conversation Markdown export remains separate from original download.
 
 Reading controls, route panels and record labels follow the interface language
 selected in Settings → General. Guide explanations continue in Chinese;
@@ -70,7 +97,9 @@ their content uncovered and honestly retryable using the existing coverage UI.
   map, personal records and knowledge connections. The map reuses `PlanDiagram`.
 
 All reading state is stored as server-authored tool results in the native chat
-record. There is no competing reading-state store. Explicit navigation uses a
+record. Independent source files retain the original format; their metadata is
+also referenced in the source event. There is no competing reading-state store.
+Explicit navigation uses a
 `reading-navigation` marker, with a human label in the transcript and an exact
 target id for the model. It is classified as learner input for provider consent.
 The guide is reconstructed each turn from the full persisted reading log. Context

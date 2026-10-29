@@ -1,4 +1,5 @@
 import type { Usage } from "@earendil-works/pi-ai";
+import { createReadingSourceLoader } from "./reading-sources.ts";
 import {
 	createPracticeAgent,
 	createReadingAgent,
@@ -452,6 +453,7 @@ export async function handleChatInput(
 		? buildAgent({ ...agentOpts, teaching })
 		: record.kind === "reading"
 			? createReadingAgent({ chatId, chatStore: stores.chatStore,
+				loadSource: createReadingSourceLoader(stores.readingSourceStore, { chatStore: stores.chatStore }),
 				...(graphToolsEnabled(effective) ? { graphStore: stores.graphStore } : {}),
 			}, agentOpts)
 		: record.kind === "practice"

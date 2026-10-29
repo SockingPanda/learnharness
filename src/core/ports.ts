@@ -27,6 +27,20 @@ import type {
 	NotesSource,
 } from "./contracts.ts";
 import type { UserSettings } from "./settings.ts";
+import type { ReadingArchive } from "./reading.ts";
+
+/** Immutable original source per reading session. */
+export interface ReadingSourceStore {
+	save(chatId: string, input: {
+		kind: "web" | "pdf";
+		originalUrl?: string;
+		originalPath?: string;
+		resolvedUrl?: string;
+		content: Uint8Array;
+	}): ReadingArchive;
+	get(chatId: string): { archive: ReadingArchive; content: Uint8Array } | null;
+	delete(chatId: string): void;
+}
 
 // ─── ChatStore — the session record's home (data/chats) ─────────────────────
 

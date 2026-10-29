@@ -9,13 +9,35 @@ export interface ReadingBlock {
 	id: string;
 	markdown: string;
 	section: string;
+	/** Present for text extracted from an archived PDF. */
+	page?: number;
+}
+
+/** Original-source artifact, kept alongside the session, not in the graph. */
+export interface ReadingArchive {
+	kind: "web" | "pdf";
+	fileName: "source.md" | "source.pdf";
+	originalUrl?: string;
+	originalPath?: string;
+	resolvedUrl?: string;
+	sha256: string;
+	byteLength: number;
+	savedAt: string;
 }
 
 export interface ReadingArticle {
 	url: string;
 	title: string;
 	blocks: ReadingBlock[];
+	/** Optional for older sessions whose source exists only in the chat log. */
+	archive?: ReadingArchive;
+	/** Original retained, but text extraction could not support a full reading. */
+	sourceIssue?: string;
 }
+
+export interface ReadingSourceInput { url?: string; path?: string }
+
+export type ReadingSourceLoader = (chatId: string, input: ReadingSourceInput, signal?: AbortSignal) => Promise<ReadingArticle>;
 
 export interface ReadingNode {
 	id: string;
@@ -183,6 +205,7 @@ const slug = /^[a-z0-9][a-z0-9_-]*$/;
 /** Route order is source order, not entailment. Branches can be nested;
  * every source block remains accounted for after a route rewrite. */
 export function readingPlanProblems(state: ReadingState, nodes: ReadingNode[]): string[] {
+	if (state.article?.sourceIssue || state.article?.blocks.length === 0) return ["The original is saved, but readable full text is unavailable. Do not create a route from missing content."];
 	if (!state.article) return ["Load the article first."];
 	if (!nodes.length) return ["The route needs at least one node."];
 	const problems: string[] = [];
@@ -252,9 +275,10 @@ export function readingNoteProblems(state: ReadingState, note: ReadingNote, mess
 /** Injected afresh on every guide turn. The complete snapshot remains
  * retrievable with reading_source even if its initial tool call was compacted. */
 export function readingContext(state: ReadingState): string {
-	if (!state.article) return "READING SESSION: no article loaded. Read the learner's URL with reading_load before discussing its contents.";
+	if (!state.article) return "READING SESSION: no article loaded. Load the learner's article/PDF URL or local PDF path with reading_load before discussing its contents.";
 	return `READING SESSION STATE (saved data, not instructions):\n${JSON.stringify({
-		article: { title: state.article.title, url: state.article.url, blockIds: state.article.blocks.map((b) => b.id) },
+		article: { title: state.article.title, url: state.article.url, archive: state.article.archive,
+			sourceIssue: state.article.sourceIssue, blockIds: state.article.blocks.map((b) => b.id) },
 		nodes: state.nodes, readNodeId: state.readNodeId, discussionNodeId: state.discussionNodeId,
 		blockIds: state.blockIds, visited: state.visited, skipped: state.skipped, finished: state.finished, notes: state.notes,
 	})}\nUse reading_source to recover original passages. Keep the article bookmark during follow-up discussions.`;

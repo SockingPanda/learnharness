@@ -53,14 +53,15 @@ function truncate(text: string, maxChars = MAX_CONTENT_CHARS, requireFull = fals
 }
 
 /** Jina Reader fallback for JS-rendered pages (no deps — plain fetch). */
-async function fetchViaJina(url: string): Promise<string | null> {
+async function fetchViaJina(url: string, signal?: AbortSignal): Promise<string | null> {
 	try {
 		const res = await fetch(`https://r.jina.ai/${url}`, {
 			headers: { Accept: "text/markdown", "X-No-Cache": "true" },
-			signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+			signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(FETCH_TIMEOUT_MS)]) : AbortSignal.timeout(FETCH_TIMEOUT_MS),
 		});
 		if (!res.ok) return null;
 		const content = await res.text();
+		signal?.throwIfAborted();
 		const marker = "Markdown Content:";
 		const start = content.indexOf(marker);
 		if (start < 0) return null;
@@ -68,6 +69,7 @@ async function fetchViaJina(url: string): Promise<string | null> {
 		if (markdown.length < MIN_USEFUL_CONTENT || markdown.startsWith("Loading...")) return null;
 		return markdown;
 	} catch {
+		signal?.throwIfAborted();
 		return null;
 	}
 }
@@ -85,8 +87,9 @@ function htmlToMarkdown(html: string, baseUrl?: string): { title: string; conten
 	return { title: article.title ?? "", content: markdown };
 }
 
-export async function fetchAndExtract(url: string, options: { maxChars?: number; requireFull?: boolean; signal?: AbortSignal } = {}): Promise<string> {
-	const limit = (text: string) => truncate(text, options.maxChars, options.requireFull);
+type ExtractOptions = { maxChars?: number; requireFull?: boolean; signal?: AbortSignal };
+
+export async function fetchAndExtract(url: string, options: ExtractOptions = {}): Promise<string> {
 	const resp = await fetch(url, {
 		headers: {
 			"User-Agent": USER_AGENT,
@@ -95,6 +98,13 @@ export async function fetchAndExtract(url: string, options: { maxChars?: number;
 		},
 		signal: options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(FETCH_TIMEOUT_MS)]) : AbortSignal.timeout(FETCH_TIMEOUT_MS),
 	});
+	return extractWebResponse(resp, url, options);
+}
+
+/** Reuse extraction when a caller has already fetched/archived the response. */
+export async function extractWebResponse(resp: Response, url: string, options: ExtractOptions = {}): Promise<string> {
+	const limit = (text: string) => truncate(text, options.maxChars, options.requireFull);
+	options.signal?.throwIfAborted();
 	if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
 
 	// Final URL after redirects + status — the researcher's only way to
@@ -123,7 +133,7 @@ export async function fetchAndExtract(url: string, options: { maxChars?: number;
 		return header + limit(extracted.content);
 	}
 	// Readability failed — likely JS-rendered. Try Jina Reader.
-	const jina = await fetchViaJina(url);
+	const jina = await fetchViaJina(url, options.signal);
 	if (jina) return limit(jina);
 	throw new Error("Could not extract readable content (the page may be JavaScript-rendered)");
 }

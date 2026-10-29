@@ -63,6 +63,48 @@ async function openDocument(filePath: string) {
 	return { doc: await task.promise, task };
 }
 
+/** Complete text-layer extraction for an archived reading source. Page
+ * numbers and empty pages survive unchanged; this never substitutes page
+ * labels, a summary or OCR for missing text. The caller owns the PDF bytes. */
+export async function pdfReadingPages(
+	data: Uint8Array,
+	options: { maxChars?: number; signal?: AbortSignal } = {},
+): Promise<{ page: number; text: string }[]> {
+	const maxChars = options.maxChars ?? 200_000;
+	if (!Number.isSafeInteger(maxChars) || maxChars < 0) throw new RangeError("PDF character limit must be a nonnegative integer.");
+	options.signal?.throwIfAborted();
+	const pdfjs = await loadPdfjs();
+	options.signal?.throwIfAborted();
+	// pdfjs may transfer its input buffer to its worker. Preserve the
+	// caller's original bytes so they can be archived without alteration.
+	const task = pdfjs.getDocument({ data: new Uint8Array(data), standardFontDataUrl: standardFontsDir(), verbosity: 0 });
+	try {
+		const doc = await task.promise;
+		const pages: { page: number; text: string }[] = [];
+		let chars = 0;
+		for (let page = 1; page <= doc.numPages; page++) {
+			options.signal?.throwIfAborted();
+			const pdfPage = await doc.getPage(page);
+			const content = await pdfPage.getTextContent();
+			options.signal?.throwIfAborted();
+			let text = "";
+			for (const item of content.items) {
+				if (!("str" in item)) continue;
+				text += item.str;
+				if (item.hasEOL) text += "\n";
+			}
+			text = text.trim();
+			chars += text.length;
+			if (chars > maxChars) throw new Error(`PDF text exceeds the ${maxChars} character limit; the full source was not extracted.`);
+			pages.push({ page, text });
+		}
+		options.signal?.throwIfAborted();
+		return pages;
+	} finally {
+		await task.destroy();
+	}
+}
+
 /** Concatenate a page's text items into a body string. */
 function itemsToText(items: unknown[]): string {
 	let out = "";

@@ -10,22 +10,49 @@ import { ToolCallCard } from "@/components/artifacts/tool-call-card";
 import { useServerEvent, useServerResync } from "@/components/server-events";
 import {
 	messageAnchorId, propositionSessionHref, readingNodeHistory,
-	type ArtifactPartProps, type GraphSnapshot, type ReadingBlock, type ReadingEvent,
+	type ArtifactPartProps, type GraphSnapshot, type ReadingArticle, type ReadingBlock, type ReadingEvent,
 	type ReadingNote, type ReadingState, type ReadingNavigation, type LhMessage,
 } from "@/src/core";
 
 const NOTE_LABEL = { understanding: "My understanding", discovery: "My discovery", question: "Open questions" } as const;
 const CONTROL = "inline-flex cursor-pointer items-center justify-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs transition-colors hover:bg-accent disabled:cursor-default disabled:opacity-40";
 
+function webSourceUrl(value?: string): string | undefined {
+	if (!value) return undefined;
+	try { return ["http:", "https:"].includes(new URL(value).protocol) ? value : undefined; }
+	catch { return undefined; }
+}
+
 export function ReadingSource({ blocks, url }: { blocks: readonly ReadingBlock[]; url?: string }) {
 	const { t } = useI18n();
+	const sourceUrl = webSourceUrl(url);
 	return <details className="my-2 rounded-lg border border-border/70 text-xs" data-testid="reading-original">
 		<summary className="cursor-pointer px-3 py-2 text-muted-foreground">{t(blocks.length === 1 ? "View original · {count} passage" : "View original · {count} passages", { count: blocks.length })}</summary>
 		<div className="space-y-4 border-t px-4 py-3 font-prose text-(length:--lh-prose-size)">
-			{blocks.map((block) => <div key={block.id} id={`reading-source-${block.id}`}><MessageResponse>{block.markdown}</MessageResponse></div>)}
-			{url && <a href={url} target="_blank" rel="noreferrer" className="text-xs text-muted-foreground underline">{t("Open article webpage ↗")}</a>}
+			{blocks.map((block, index) => <div key={block.id} id={`reading-source-${block.id}`}>
+				{block.page !== undefined && blocks[index - 1]?.page !== block.page && <p data-reading-page={block.page} className="mb-2 font-ui text-xs text-muted-foreground">{t("Page {page}", { page: block.page })}</p>}
+				<MessageResponse>{block.markdown}</MessageResponse>
+			</div>)}
+			{sourceUrl && <a href={sourceUrl} target="_blank" rel="noreferrer" className="text-xs text-muted-foreground underline">{t("Open original link ↗")}</a>}
 		</div>
 	</details>;
+}
+
+function ReadingOriginalFile({ article, chatId }: { article: ReadingArticle; chatId: string }) {
+	const { t } = useI18n();
+	const sourceUrl = webSourceUrl(article.archive?.originalUrl ?? article.url);
+	const pdf = article.archive?.kind === "pdf";
+	const fileName = article.archive?.fileName ?? "source.md";
+	const localName = article.archive?.originalPath?.split(/[\\/]/).at(-1);
+	return <section aria-label={t("Original source")} data-testid="reading-source-file" className="mx-auto mb-4 max-w-3xl space-y-2 rounded-lg border border-border bg-card px-4 py-3 text-xs">
+		<div className="flex flex-wrap items-center justify-between gap-2">
+			<span className="text-muted-foreground">{t("Original source")}</span>
+			{(article.archive || article.blocks.length > 0) && <a data-testid="reading-source-download" href={`/api/chats/${encodeURIComponent(chatId)}/reading-source`} download={fileName} className={CONTROL}>{t(pdf ? "Download original (.pdf)" : "Download original (.md)")}</a>}
+		</div>
+		{sourceUrl && <a data-testid="reading-source-link" href={sourceUrl} target="_blank" rel="noreferrer" className="block break-all text-muted-foreground underline">{sourceUrl}</a>}
+		{localName && <p className="break-all text-muted-foreground">{t("Local PDF: {name}", { name: localName })}</p>}
+		{article.sourceIssue && article.blocks.length === 0 && <p role="status">{t("The original file is saved, but its full text could not be extracted. You can download the original.")}</p>}
+	</section>;
 }
 
 /** The source expander is attached to the passage that was actually read,
@@ -37,7 +64,10 @@ export function ReadingArtifact({ part }: ArtifactPartProps) {
 	const output = part.output as { readingEvent?: ReadingEvent; source?: ReadingBlock[]; url?: string; title?: string } | undefined;
 	const event = output?.readingEvent;
 	if (!event) return null;
-	if (event.kind === "source") return <div className="my-3 flex items-center gap-2 text-sm text-muted-foreground"><BookOpenIcon className="size-4 shrink-0" /><span>{event.article.title}</span></div>;
+	if (event.kind === "source") return <div className="my-3 space-y-1 text-sm text-muted-foreground">
+		<div className="flex items-center gap-2"><BookOpenIcon className="size-4 shrink-0" /><span>{event.article.title}</span>{event.article.archive && <span className="text-xs">{t(event.article.archive.kind === "pdf" ? "Original PDF saved" : "Original Markdown saved")}</span>}</div>
+		{event.article.sourceIssue && event.article.blocks.length === 0 && <p role="status" className="text-xs">{t("The original file is saved, but its full text could not be extracted. You can download the original.")}</p>}
+	</div>;
 	if (event.kind === "focus" && (event.action === "read" || event.action === "return")) return <ReadingSource blocks={output?.source ?? []} url={output?.url} />;
 	if (event.kind === "note") return <div id={part.resultMessageId ? messageAnchorId(part.resultMessageId) : undefined} data-testid="reading-saved-note" className="my-2 border-l-2 border-sky-400/60 pl-3 text-sm">
 		<span className="mr-2 text-xs text-muted-foreground">{t(NOTE_LABEL[event.note.kind])}</span>{event.note.text}
@@ -52,14 +82,15 @@ export function ReadingToolbar({ state, busy, onOpen, onAction }: {
 	const bookmark = state.nodes.find((n) => n.id === state.readNodeId);
 	const discussion = state.nodes.find((n) => n.id === state.discussionNodeId);
 	const detour = discussion && discussion.id !== bookmark?.id;
+	const sourceUnavailable = Boolean(state.article?.sourceIssue && state.article.blocks.length === 0);
 	return <div data-testid="reading-toolbar" className="pointer-events-auto mb-2 space-y-2 rounded-xl border border-border bg-card/95 px-3 py-2">
 		<div className="flex min-w-0 items-center gap-2 text-xs">
 			<BookOpenIcon className="size-3.5 shrink-0 text-sky-400" />
-			<span className="min-w-0 flex-1 truncate text-muted-foreground">{state.finished ? t("Finished reading; keep discussing or revisit the article") : bookmark ? t("Article bookmark: {title}", { title: bookmark.title }) : t("Ready to start reading")}</span>
+			<span className="min-w-0 flex-1 truncate text-muted-foreground">{sourceUnavailable ? t("Original saved; full text unavailable") : state.finished ? t("Finished reading; keep discussing or revisit the article") : bookmark ? t("Article bookmark: {title}", { title: bookmark.title }) : t("Ready to start reading")}</span>
 			<button type="button" onClick={onOpen} className="shrink-0 cursor-pointer text-foreground hover:underline">{state.notes.length ? t("Route and notes · {count}", { count: state.notes.length }) : t("Route and notes")}</button>
 		</div>
 		{detour && <p className="flex items-center gap-1.5 text-xs text-muted-foreground"><GitBranchIcon className="size-3" />{t("Exploring: {title}", { title: discussion.title })}</p>}
-		{state.nodes.length > 0 && <div className="flex flex-wrap gap-2">
+		{state.nodes.length > 0 && !sourceUnavailable && <div className="flex flex-wrap gap-2">
 			{detour && <button type="button" disabled={busy} className={CONTROL} onClick={() => onAction({ action: "return" })}><CornerUpLeftIcon className="size-3" />{t("Return to article")}</button>}
 			<button type="button" disabled={busy} data-testid="reading-continue" className={`${CONTROL} bg-foreground text-background hover:bg-foreground/85`} onClick={() => onAction({ action: state.finished ? "review" : "next" })}>{t(state.finished ? "Review what you learned" : "Continue reading")}<ArrowRightIcon className="size-3" /></button>
 			{!state.finished && <button type="button" disabled={busy} className={CONTROL} onClick={() => onAction({ action: "skip" })}>{t("Skip this section")}</button>}
@@ -154,6 +185,7 @@ export function ReadingPanel({ state, messages = [], chatId, busy, onClose, onAc
 	const notes = useMemo(() => selected ? state.notes.filter((n) => n.nodeId === selected.id) : [], [selected, state.notes]);
 	const history = useMemo(() => selected ? readingNodeHistory(messages, selected.id) : [], [selected, messages]);
 	const act = (navigation: ReadingNavigation) => { onClose(); onAction(navigation); };
+	const sourceUnavailable = Boolean(state.article?.sourceIssue && state.article.blocks.length === 0);
 	return <div ref={root} role="dialog" aria-modal="true" aria-label={t("Reading route and notes")} data-testid="reading-panel" className="absolute inset-0 z-40 flex flex-col bg-background/95 backdrop-blur-sm">
 		<div className="flex shrink-0 items-center gap-3 border-b px-4 py-3">
 			<BookOpenIcon className="size-4 shrink-0" /><span className="min-w-0 flex-1 truncate text-sm">{state.article?.title ?? t("Reading route and notes")}</span>
@@ -163,9 +195,10 @@ export function ReadingPanel({ state, messages = [], chatId, busy, onClose, onAc
 			{([["route", t("Reading route")], ["notes", t("My notes · {count}", { count: state.notes.length })], ["knowledge", t("Knowledge connections")]] as const).map(([key, label]) => <button key={key} type="button" aria-pressed={tab === key} onClick={() => setTab(key)} className={`${CONTROL} ${tab === key ? "bg-accent" : "border-transparent text-muted-foreground"}`}>{label}</button>)}
 		</div>
 		<div className="min-h-0 flex-1 overflow-y-auto p-4">
-			{tab === "route" && <>
-				<div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground"><span className="text-sky-400">{t("Blue outline: article bookmark")}</span><span>{t("Yellow glow: current discussion")}</span><span>{t("Solid lines: reading order · Dashed lines: discussion branches")}</span></div>
-				<label className="mt-3 flex cursor-pointer items-center gap-2 text-xs text-muted-foreground"><input type="checkbox" checked={showBranches} onChange={(e) => setShowBranches(e.target.checked)} />{t("Expand all discussion branches")}</label>
+			{state.article && <ReadingOriginalFile article={state.article} chatId={chatId} />}
+			{tab === "route" && !sourceUnavailable && <>
+				{state.nodes.length > 0 && <><div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground"><span className="text-sky-400">{t("Blue outline: article bookmark")}</span><span>{t("Yellow glow: current discussion")}</span><span>{t("Solid lines: reading order · Dashed lines: discussion branches")}</span></div>
+				<label className="mt-3 flex cursor-pointer items-center gap-2 text-xs text-muted-foreground"><input type="checkbox" checked={showBranches} onChange={(e) => setShowBranches(e.target.checked)} />{t("Expand all discussion branches")}</label></>}
 				{state.nodes.length ? <ReadingDiagram state={state} showBranches={showBranches} onSelect={setSelectedId} /> : <p className="my-6 text-sm text-muted-foreground">{t("The reading route will appear here after the guide reviews the article.")}</p>}
 				{selected && <section className="mx-auto max-w-3xl space-y-3 border-t pt-4">
 					<div className="flex flex-wrap items-center gap-2"><h2 className="flex-1 font-prose text-lg">{selected.title}</h2><span className="text-xs text-muted-foreground">{t(state.skipped.includes(selected.id) ? "Skipped" : selected.id === state.discussionNodeId ? "Current discussion" : selected.id === state.readNodeId ? "Article bookmark" : state.visited.includes(selected.id) ? "Read / discussed" : "Not explored yet")}</span></div>
