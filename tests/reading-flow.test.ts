@@ -39,8 +39,8 @@ const nodes: ReadingNode[] = [
 it("persists an independent reading session, resumes a detour, and connects its insight to an existing graph node", async () => {
 	const response = await createSession(new Request("http://test/api/chats", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: "读这篇文章", kind: "reading" }) }));
 	const { id } = await response.json() as { id: string };
-	assert.equal(chatStore.getChat(id)?.kind, "reading");
-	chatStore.saveSettings(id, { model: { provider: "openrouter", id: "z-ai/glm-5.3-flash" } });
+	assert.equal((await chatStore.getChat(id))?.kind, "reading");
+	(await chatStore.saveSettings(id, { model: { provider: "openrouter", id: "z-ai/glm-5.3-flash" } }));
 	let fetches = 0;
 	const loadSource = createReadingSourceLoader(readingSourceStore, { chatStore, fetch: async () => {
 		fetches++;
@@ -53,7 +53,7 @@ it("persists an independent reading session, resumes a detour, and connects its 
 		assert.equal(ack.status, 200, await ack.clone().text());
 		const handle = runningTurn(id);
 		if (handle) await new Response(handle.subscribe()).text();
-		assert.ok(!chatStore.getChat(id)!.messages.some((m) => m.role === "assistant" && m.stopReason === "error"));
+		assert.ok(!(await chatStore.getChat(id))!.messages.some((m) => m.role === "assistant" && m.stopReason === "error"));
 	};
 	await turn("带我读 https://example.test/article", [
 		call("reading_load", { url: "https://example.test/article" }, "load"),
@@ -62,7 +62,7 @@ it("persists an independent reading session, resumes a detour, and connects its 
 		fauxAssistantMessage("我们先读固定基线这一段。固定比较对象有助于比较性能变化。"),
 	]);
 	assert.equal(fetches, 1);
-	assert.equal(readingSourceStore.get(id)?.archive.kind, "web");
+	assert.equal((await readingSourceStore.get(id))?.archive.kind, "web");
 	const prompt = composeInstructions("reading");
 	assert.match(prompt, /primarily in Chinese/);
 	assert.ok(!prompt.includes("Check that the step landed"));
@@ -73,20 +73,20 @@ it("persists an independent reading session, resumes a detour, and connects its 
 	await turn("我发现固定比较对象很重要。但测量有波动怎么办？", [
 		call("reading_plan", { nodes: [...nodes, branch] }, "branch"),
 		call("reading_focus", { action: "discuss", nodeId: "measurement" }, "discuss"),
-		() => {
-			const user = chatStore.getChat(id)!.messages.filter((m) => m.role === "user").at(-1)!;
+		async () => {
+			const user = (await chatStore.getChat(id))!.messages.filter((m) => m.role === "user").at(-1)!;
 			return call("reading_note", { id: "fixed-baseline", kind: "discovery", text: "固定比较对象很重要。", nodeId: "baseline", blockIds: ["b2"], evidence: [{ messageId: user.id, quote: "固定比较对象很重要" }], graphNodeIds: [] }, "note");
 		},
 		fauxAssistantMessage("我们展开测量波动这个问题，文章先停在这里。"),
 	]);
-	const during = readingStateOf(chatStore.getChat(id)!.messages);
+	const during = readingStateOf((await chatStore.getChat(id))!.messages);
 	assert.equal(during.readNodeId, "baseline");
 	assert.equal(during.discussionNodeId, "measurement");
 	assert.deepEqual(during.blockIds, ["b2"]);
 	assert.equal(during.notes.length, 1);
-	assert.match(readingSessionContext(chatStore.getChat(id)!.messages), /fixed-baseline/);
+	assert.match(readingSessionContext((await chatStore.getChat(id))!.messages), /fixed-baseline/);
 	await turn({ action: "return" }, [call("reading_focus", { action: "return" }, "return"), fauxAssistantMessage("回到刚才固定比较对象的原文，这和我们讨论的测量方法接起来了。")]);
-	assert.equal(readingStateOf(chatStore.getChat(id)!.messages).discussionNodeId, "baseline");
+	assert.equal(readingStateOf((await chatStore.getChat(id))!.messages).discussionNodeId, "baseline");
 	const refused = await handleChatInput(id, { type: "reading", action: "read", nodeId: "unknown" });
 	assert.equal(refused.status, 400);
 	await turn({ action: "read", nodeId: "quality" }, [
@@ -95,13 +95,13 @@ it("persists an independent reading session, resumes a detour, and connects its 
 		call("reading_focus", { action: "finish" }, "finish"),
 		fauxAssistantMessage("我们读完了文章，之前的发现和疑问都保留在阅读记录中。"),
 	]);
-	assert.equal(readingStateOf(chatStore.getChat(id)!.messages).finished, true);
+	assert.equal(readingStateOf((await chatStore.getChat(id))!.messages).finished, true);
 	assert.equal(fetches, 1, "reopening and returning use the saved source");
 
 	// Actual extractor/auditor/merger over the real isolated stores. The
 	// same proposition from an older session is reused, not copied.
-	const old = chatStore.createChat("以前的性能笔记");
-	graphStore.appendNode({ id: "n_baseline", name: "固定性能基线", statement: "固定比较对象有助于比较性能变化。", aliases: [], provenance: [{ chatId: old.id, messageId: "" }], createdAt: new Date().toISOString() });
+	const old = (await chatStore.createChat("以前的性能笔记"));
+	(await graphStore.appendNode({ id: "n_baseline", name: "固定性能基线", statement: "固定比较对象有助于比较性能变化。", aliases: [], provenance: [{ chatId: old.id, messageId: "" }], createdAt: new Date().toISOString() }));
 	const evidenceId = during.notes[0]!.evidence[0]!.messageId;
 	let extractionPrompt = "";
 	const extractor = engine([(context) => {
@@ -113,17 +113,17 @@ it("persists an independent reading session, resumes a detour, and connects its 
 	await pipeline.runExtraction(id);
 	assert.match(extractionPrompt, /LEARNER/);
 	assert.match(extractionPrompt, /Questions, tentative hypotheses/);
-	const merged = graphStore.readNodes().filter((n) => n.id === "n_baseline");
-	assert.equal(new Set(graphStore.readNodes().map((n) => n.id)).size, 1);
+	const merged = (await graphStore.readNodes()).filter((n) => n.id === "n_baseline");
+	assert.equal(new Set((await graphStore.readNodes()).map((n) => n.id)).size, 1);
 	assert.ok(merged.some((n) => n.provenance.some((p) => p.chatId === id && p.messageId === evidenceId)));
-	assert.ok(graphStore.readCoverage().length > 0);
+	assert.ok((await graphStore.readCoverage()).length > 0);
 
-	if (process.env.LH_READING_FIXTURE_OUTPUT) fs.writeFileSync(process.env.LH_READING_FIXTURE_OUTPUT, JSON.stringify(chatStore.getChat(id), null, "\t"));
+	if (process.env.LH_READING_FIXTURE_OUTPUT) fs.writeFileSync(process.env.LH_READING_FIXTURE_OUTPUT, JSON.stringify((await chatStore.getChat(id)), null, "\t"));
 });
 
 it("coalesces an exchange arriving during extraction so the last discovery is not stranded", async () => {
-	const chat = chatStore.createChat("连续追问", "reading");
-	chatStore.saveMessages(chat.id, [newUserMessage("第一个发现。")]);
+	const chat = (await chatStore.createChat("连续追问", "reading"));
+	(await chatStore.saveMessages(chat.id, [newUserMessage("第一个发现。")]));
 	let release!: () => void;
 	let started!: () => void;
 	const blocked = new Promise<void>((resolve) => { release = resolve; });
@@ -136,11 +136,11 @@ it("coalesces an exchange arriving during extraction so the last discovery is no
 	});
 	const first = pipeline.runExtraction(chat.id);
 	await entered;
-	chatStore.saveMessages(chat.id, [...chatStore.getChat(chat.id)!.messages, newUserMessage("最后一个发现，不能丢。")]);
+	(await chatStore.saveMessages(chat.id, [...(await chatStore.getChat(chat.id))!.messages, newUserMessage("最后一个发现，不能丢。")]));
 	await pipeline.runExtraction(chat.id);
 	release();
 	await first;
-	for (let i = 0; i < 100 && coverageOf(chatStore.getChat(chat.id)!.messages, graphStore.readCoverage(), chat.id, true).uncoveredCount; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+	for (let i = 0; i < 100 && coverageOf((await chatStore.getChat(chat.id))!.messages, (await graphStore.readCoverage()), chat.id, true).uncoveredCount; i++) await new Promise((resolve) => setTimeout(resolve, 10));
 	assert.equal(calls, 2);
-	assert.equal(coverageOf(chatStore.getChat(chat.id)!.messages, graphStore.readCoverage(), chat.id, true).uncoveredCount, 0);
+	assert.equal(coverageOf((await chatStore.getChat(chat.id))!.messages, (await graphStore.readCoverage()), chat.id, true).uncoveredCount, 0);
 });

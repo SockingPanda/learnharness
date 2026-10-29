@@ -39,8 +39,8 @@ function sourceMarkdown(raw: string): string {
 }
 
 /** Backfill old sessions from their saved text, never from a changed website. */
-export function archiveReadingSnapshot(store: ReadingSourceStore, chatId: string, article: ReadingArticle): ReadingArchive {
-	const existing = store.get(chatId);
+export async function archiveReadingSnapshot(store: ReadingSourceStore, chatId: string, article: ReadingArticle): Promise<ReadingArchive> {
+	const existing = await store.get(chatId);
 	if (existing) {
 		const expected = new URL(article.url).href;
 		const actual = existing.archive.originalUrl ? new URL(existing.archive.originalUrl).href : pathToFileURL(existing.archive.originalPath!).href;
@@ -112,7 +112,7 @@ function pdfTitle(archive: ReadingArchive): string {
 	catch { return last || "PDF document"; }
 }
 
-async function articleFromArchive(saved: NonNullable<ReturnType<ReadingSourceStore["get"]>>, signal?: AbortSignal): Promise<ReadingArticle> {
+async function articleFromArchive(saved: NonNullable<Awaited<ReturnType<ReadingSourceStore["get"]>>>, signal?: AbortSignal): Promise<ReadingArticle> {
 	const { archive, content } = saved;
 	const url = archive.originalUrl ?? pathToFileURL(archive.originalPath!).href;
 	if (archive.kind === "web") {
@@ -140,16 +140,18 @@ export function createReadingSourceLoader(store: ReadingSourceStore, options: { 
 	return async (chatId, input, signal) => {
 		signal?.throwIfAborted();
 		const source = sourceInput(input);
-		const checkChat = () => {
-			if (options.chatStore && options.chatStore.getChat(chatId)?.kind !== "reading") throw new Error("This reading session no longer exists.");
+		const checkChat = async () => {
+			const chat = options.chatStore ? await options.chatStore.getChat(chatId) : null;
+			if (options.chatStore && (chat?.kind !== "reading" || chat.deleting)) throw new Error("This reading session no longer exists.");
+			return chat;
 		};
-		checkChat();
-		const previous = options.chatStore ? readingStateOf(options.chatStore.getChat(chatId)!.messages).article : null;
+		const chat = await checkChat();
+		const previous = chat ? readingStateOf(chat.messages).article : null;
 		if (previous) {
 			if (new URL(previous.url).href !== source.location) throw new Error("This session already has a source. Start another reading session for a different source.");
-			return { ...previous, archive: archiveReadingSnapshot(store, chatId, previous) };
+			return { ...previous, archive: await archiveReadingSnapshot(store, chatId, previous) };
 		}
-		const existing = store.get(chatId);
+		const existing = await store.get(chatId);
 		if (existing) {
 			if (!sameOrigin(existing.archive, source)) throw new Error("This session already has a saved source. Start another reading session for a different source.");
 			return articleFromArchive(existing, signal);
@@ -183,8 +185,8 @@ export function createReadingSourceLoader(store: ReadingSourceStore, options: { 
 			}
 		}
 		signal?.throwIfAborted();
-		checkChat();
-		const archive = store.save(chatId, { kind, content, originalUrl: source.url, originalPath: source.filePath, resolvedUrl });
+		await checkChat();
+		const archive = await store.save(chatId, { kind, content, originalUrl: source.url, originalPath: source.filePath, resolvedUrl });
 		return articleFromArchive({ archive, content }, signal);
 	};
 }
