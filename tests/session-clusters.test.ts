@@ -12,12 +12,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { GraphChain, GraphNode, NotesSource, ChatSummary } from "../src/core/contracts.ts";
-import type { ChatStore, GraphStore } from "../src/core/ports.ts";
+import type { ChatStore, GraphMemoryStore, SyncStore } from "../src/core/ports.ts";
 import {
 	graphSessionIndex,
 	graphSessionPropositions,
 	graphSnapshot,
-	type GraphDeps,
+	type GraphCalculationDeps,
 } from "../src/core/graph.ts";
 import {
 	attachImpToCommunities,
@@ -48,9 +48,9 @@ function fakeStores(
 		sources?: Array<Pick<NotesSource, "id" | "filePath" | "importedAt">>;
 		chains?: GraphChain[];
 	} = {},
-): GraphDeps {
+): GraphCalculationDeps {
 	const chains: GraphChain[] = over.chains ?? [];
-	const graphStore: GraphStore = {
+	const graphStore: GraphMemoryStore = {
 		readNodes: () => nodes,
 		readChains: () => chains,
 		readCheckpoints: () => [],
@@ -59,13 +59,13 @@ function fakeStores(
 			(over.sources ?? []).map((s) => ({ ...s, extractions: [] }) as unknown as NotesSource),
 		readPositions: () => ({}),
 		writePositions: () => {},
-	} as unknown as GraphStore;
-	const chatStore: ChatStore = {
+	} as unknown as GraphMemoryStore;
+	const chatStore: SyncStore<ChatStore> = {
 		listChats: () =>
 			(over.chats ?? []).map((c) => ({ ...c, messageCount: 0 }) as unknown as ChatSummary),
 		getChat: (id: string) =>
 			((over.chats ?? []).find((c) => c.id === id) as unknown as ChatSummary) ?? undefined,
-	} as unknown as ChatStore;
+	} as unknown as SyncStore<ChatStore>;
 	return { chatStore, graphStore };
 }
 

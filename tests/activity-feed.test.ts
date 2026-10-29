@@ -15,27 +15,27 @@ import { jobStore } from "../src/store/jobs.ts";
 import { PATHS } from "../config.ts";
 import { activityFeed } from "../src/server/observability.ts";
 
-test("activityFeed: running jobs across ALL chats, running-only, title-joined, oldest first", () => {
-	const chatA = chatStore.createChat("feed chat A");
-	const chatB = chatStore.createChat("feed chat B");
+test("activityFeed: running jobs across ALL chats, running-only, title-joined, oldest first", async () => {
+	const chatA = (await chatStore.createChat("feed chat A"));
+	const chatB = (await chatStore.createChat("feed chat B"));
 	// job ids tracked as created — the finally cleanup stays scoped to them even
 	// if the test throws mid-way (test files run as concurrent processes over
 	// the shared data/ scratch; wiping the whole jobs dir would delete other
 	// processes' live fixtures — the wave-4 flake lesson)
 	const createdJobs: string[] = [];
 	try {
-		const jobA = jobStore.createJob({ kind: "research", chatId: chatA.id, toolCallId: "tc_a" });
-		const jobB = jobStore.createJob({ kind: "demo", chatId: chatB.id, toolCallId: "tc_b" });
-		const jobDone = jobStore.createJob({ kind: "research", chatId: chatA.id, toolCallId: "tc_done" });
+		const jobA = (await jobStore.createJob({ kind: "research", chatId: chatA.id, toolCallId: "tc_a" }));
+		const jobB = (await jobStore.createJob({ kind: "demo", chatId: chatB.id, toolCallId: "tc_b" }));
+		const jobDone = (await jobStore.createJob({ kind: "research", chatId: chatA.id, toolCallId: "tc_done" }));
 		createdJobs.push(jobA.id, jobB.id, jobDone.id);
-		jobStore.updateJob(jobDone.id, { status: "done" });
-		const jobB2 = jobStore.createJob({ kind: "research", chatId: chatB.id, toolCallId: "tc_b2" });
+		(await jobStore.updateJob(jobDone.id, { status: "done" }));
+		const jobB2 = (await jobStore.createJob({ kind: "research", chatId: chatB.id, toolCallId: "tc_b2" }));
 		createdJobs.push(jobB2.id);
 		// make jobB2 the MOST recently active → should still sort AFTER jobA/jobB (oldest-first).
 		// Explicit later timestamp: the real bump can land in the same ms as creation.
-		jobStore.updateJob(jobB2.id, { activity: "second step", updatedAt: new Date(Date.now() + 10).toISOString() });
+		(await jobStore.updateJob(jobB2.id, { activity: "second step", updatedAt: new Date(Date.now() + 10).toISOString() }));
 
-		const feed = activityFeed();
+		const feed = (await activityFeed());
 		const feedJobs = feed.jobs.filter((j) => [jobA.id, jobB.id, jobB2.id].includes(j.id));
 		assert.equal(feedJobs.length, 3); // done job filtered out
 		for (const j of feedJobs) {
@@ -60,11 +60,11 @@ test("activityFeed: running jobs across ALL chats, running-only, title-joined, o
 	}
 });
 
-test("activityFeed: contextLimit is the server's live-catalog join (owner amendment, 2026-09-23)", () => {
+test("activityFeed: contextLimit is the server's live-catalog join (owner amendment, 2026-09-23)", async () => {
 	// keyed-provider federation — the same env-key pattern as the
 	// model-catalog tests; file-local (each test file is its own process)
 	process.env.OPENROUTER_API_KEY ??= "test-key-openrouter-catalog";
-	const chat = chatStore.createChat("limit join chat");
+	const chat = (await chatStore.createChat("limit join chat"));
 	const createdJobs: string[] = [];
 	const usageFor = (model: string) => ({
 		model,
@@ -76,14 +76,14 @@ test("activityFeed: contextLimit is the server's live-catalog join (owner amendm
 		steps: 1,
 	});
 	try {
-		const known = jobStore.createJob({ kind: "research", chatId: chat.id, toolCallId: "tc_known" });
-		const unknown = jobStore.createJob({ kind: "research", chatId: chat.id, toolCallId: "tc_unknown" });
-		const bare = jobStore.createJob({ kind: "research", chatId: chat.id, toolCallId: "tc_bare" });
+		const known = (await jobStore.createJob({ kind: "research", chatId: chat.id, toolCallId: "tc_known" }));
+		const unknown = (await jobStore.createJob({ kind: "research", chatId: chat.id, toolCallId: "tc_unknown" }));
+		const bare = (await jobStore.createJob({ kind: "research", chatId: chat.id, toolCallId: "tc_bare" }));
 		createdJobs.push(known.id, unknown.id, bare.id);
-		jobStore.updateJob(known.id, { usage: usageFor("openrouter:z-ai/glm-5.3-flash") });
-		jobStore.updateJob(unknown.id, { usage: usageFor("nope/unknown") });
+		(await jobStore.updateJob(known.id, { usage: usageFor("openrouter:z-ai/glm-5.3-flash") }));
+		(await jobStore.updateJob(unknown.id, { usage: usageFor("nope/unknown") }));
 
-		const feed = activityFeed();
+		const feed = (await activityFeed());
 		const knownJob = feed.jobs.find((j) => j.id === known.id)!;
 		// pi 1.0.2's catalog: glm-5.3-flash contextWindow 1_048_575 (was
 		// 1_048_576 at 0.87.1 — upstream models.dev refresh).

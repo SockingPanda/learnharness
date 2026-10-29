@@ -15,8 +15,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createExtractionPipeline } from "../src/agent/subagents/extraction.ts";
-import { getGraph } from "../src/core/graph.ts";
-import { effectiveSettings, stores } from "../src/server/stores.ts";
+import { readDerivedGraph } from "../src/agent/graph-storage.ts";
+import { closeStorage, effectiveSettings, stores } from "../src/server/stores.ts";
 
 async function main() {
 	const dir = process.argv[2] ?? "real-data-extraction/learn-sessions";
@@ -55,11 +55,11 @@ async function main() {
 	});
 	await Promise.all(workers);
 
-	const graph = getGraph(stores.graphStore);
+	const graph = await readDerivedGraph(stores.graphStore);
 	console.log(
 		`[import-notes] done: +${totals.nodes} nodes, +${totals.chains} chains, ${totals.failed} failed — ` +
 			`graph now ${graph.nodes.length} nodes, ${graph.chains.length} chains`,
 	);
 }
 
-main();
+main().finally(closeStorage);

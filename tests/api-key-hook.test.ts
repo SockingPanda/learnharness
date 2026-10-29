@@ -37,8 +37,8 @@ function fauxEngine(): PiEngine {
 }
 
 describe("the getApiKey-hook fix (native per-provider key resolution)", () => {
-	it("teacher and prober builds expose NO getApiKey hook — pi-ai resolves keys natively", () => {
-		const chatId = chatStore.createChat("getApiKey pin").id;
+	it("teacher and prober builds expose NO getApiKey hook — pi-ai resolves keys natively", async () => {
+		const chatId = (await chatStore.createChat("getApiKey pin")).id;
 		const ctx: ProberToolContext = { chatId, chatStore, deliver: () => {}, jobStore, spawn: () => {} };
 		const builds: TeachingAgent[] = [
 			createTeacherAgent(undefined, { engine: fauxEngine() }),

@@ -78,10 +78,10 @@ function testRunner() {
 		deliver: async (steer) => {
 			steers.push(steer);
 			const jobId = (steer.details as { jobId: string }).jobId;
-			const job = jobStore.getJob(jobId);
+			const job = (await jobStore.getJob(jobId));
 			if (job && job.status === "running") {
 				const failed = job.result ? isSubagentFailure(job.kind, job.result as never) : true;
-				jobStore.updateJob(jobId, { status: failed ? "error" : "done", activity: failed ? "failed" : "delivered" });
+				(await jobStore.updateJob(jobId, { status: failed ? "error" : "done", activity: failed ? "failed" : "delivered" }));
 			}
 		},
 	});
@@ -766,16 +766,12 @@ describe("visual maker (fake model + fake headless)", () => {
 
 const DEMO_INPUT = { title: "Compound interest", brief: "Slider for rate, curve of growth over 30 years." };
 
-function waitFor(cond: () => boolean, timeoutMs = 5000, what = "condition"): Promise<void> {
-	return new Promise((resolve, reject) => {
-		const started = Date.now();
-		const tick = () => {
-			if (cond()) return resolve();
-			if (Date.now() - started > timeoutMs) return reject(new Error(`timeout waiting for ${what}`));
-			setTimeout(tick, 25);
-		};
-		tick();
-	});
+async function waitFor(cond: () => boolean | Promise<boolean>, timeoutMs = 5000, what = "condition"): Promise<void> {
+	const started = Date.now();
+	while (!await cond()) {
+		if (Date.now() - started > timeoutMs) throw new Error(`timeout waiting for ${what}`);
+		await new Promise((resolve) => setTimeout(resolve, 25));
+	}
 }
 
 async function drain(res: Response): Promise<string> {
@@ -795,11 +791,11 @@ async function drainRunning(chatId: string): Promise<string> {
 
 describe("demo/visual job runners", () => {
 	it("runJob completes a demo: result on the job, steer via deliver, ack stays on the part", async () => {
-		const chat = chatStore.createChat("Test: demo runner");
+		const chat = (await chatStore.createChat("Test: demo runner"));
 		createdChats.push(chat.id);
 		// Wave B: a NATIVE fixture (the record holds agent history) — the
 		// runner's transcript scan reads it through the projection.
-		chatStore.saveMessages(chat.id, [
+		(await chatStore.saveMessages(chat.id, [
 			{ id: "u1", role: "user", content: "show me compounding", timestamp: 1 } as never,
 			{
 				id: "a1",
@@ -822,9 +818,9 @@ describe("demo/visual job runners", () => {
 				isError: false,
 				timestamp: 1,
 			} as never,
-		]);
+		]));
 
-		const job = jobStore.createJob({ kind: "demo", chatId: chat.id, toolCallId: "call-d1" });
+		const job = (await jobStore.createJob({ kind: "demo", chatId: chat.id, toolCallId: "call-d1" }));
 		createdJobs.push(job.id);
 
 		// runJob has no headless injection point — the module override is the seam.
@@ -842,7 +838,7 @@ describe("demo/visual job runners", () => {
 			demoModelOverride.current = undefined;
 		}
 
-		const done = jobStore.getJob(job.id)!;
+		const done = (await jobStore.getJob(job.id))!;
 		assert.equal(done.status, "done");
 		assert.equal(done.activity, "finished", "the worker finishes independently of delivery");
 		const result = done.result as { title: string; html: string; tested: boolean; notes?: string };
@@ -858,16 +854,16 @@ describe("demo/visual job runners", () => {
 
 		// The tool part keeps the DISPATCH ACK forever — the result never
 		// rewrites it (the teacher gets the result once, via the steer).
-		const saved = projectNative(chatStore.getChat(chat.id)!.messages);
+		const saved = projectNative((await chatStore.getChat(chat.id))!.messages);
 		const part = saved[1]!.parts.find((p) => p.type === "tool-demo");
 		assert.ok(part && part.type === "tool-demo", "demo tool part persisted");
 		assert.equal(typeof (part as { output?: unknown }).output, "string", "part output is the ack, not the result");
 	});
 
 	it("runJob still steers on visual failure and the job lands error", async () => {
-		const chat = chatStore.createChat("Test: visual runner failure");
+		const chat = (await chatStore.createChat("Test: visual runner failure"));
 		createdChats.push(chat.id);
-		chatStore.saveMessages(chat.id, [
+		(await chatStore.saveMessages(chat.id, [
 			{ id: "u1", role: "user", content: "draw it", timestamp: 1 } as never,
 			{
 				id: "a1",
@@ -890,9 +886,9 @@ describe("demo/visual job runners", () => {
 				isError: false,
 				timestamp: 1,
 			} as never,
-		]);
+		]));
 
-		const job = jobStore.createJob({ kind: "visual", chatId: chat.id, toolCallId: "call-v1" });
+		const job = (await jobStore.createJob({ kind: "visual", chatId: chat.id, toolCallId: "call-v1" }));
 		createdJobs.push(job.id);
 
 		visualModelOverride.current = scriptedModel([{ text: "cannot" }]);
@@ -903,7 +899,7 @@ describe("demo/visual job runners", () => {
 			visualModelOverride.current = undefined;
 		}
 
-		const errored = jobStore.getJob(job.id)!;
+		const errored = (await jobStore.getJob(job.id))!;
 		assert.equal(errored.status, "error");
 		assert.match(errored.error ?? "", /never wrote an SVG/);
 
@@ -914,11 +910,11 @@ describe("demo/visual job runners", () => {
 	});
 
 	it("dispatch through a teacher turn: the call acks mid-turn and the runner completes in the background", async () => {
-		const chat = chatStore.createChat("Test: demo spawn dispatch");
+		const chat = (await chatStore.createChat("Test: demo spawn dispatch"));
 		createdChats.push(chat.id);
 		// BYOK turn gate (owner, 2026-09-22): the scripted chat needs a
 		// conversation model — the per-chat pin, exactly like the setup flow.
-		chatStore.saveSettings(chat.id, { model: { provider: "openrouter", id: "z-ai/glm-5.3-flash" } });
+		(await chatStore.saveSettings(chat.id, { model: { provider: "openrouter", id: "z-ai/glm-5.3-flash" } }));
 
 		// A teacher that calls demo on turn 1, then continues in the SAME turn.
 		const teacher = scriptedModel([
@@ -966,17 +962,17 @@ describe("demo/visual job runners", () => {
 			if (ack.status !== 200) assert.fail(`expected 200 ack, got ${ack.status}: ${await ack.text()}`);
 			await drainRunning(chat.id);
 
-			const job = jobStore.findJobByToolCallId(chat.id, "call-d2");
+			const job = (await jobStore.findJobByToolCallId(chat.id, "call-d2"));
 			assert.ok(job, "dispatch created a job at tool-execute time");
 			assert.equal(job!.kind, "demo");
 			createdJobs.push(job!.id);
 
 			// The background runner (fire-and-forget) completes with the overrides.
-			await waitFor(() => jobStore.getJob(job!.id)!.status !== "running", 8000, "demo job completion");
-			const done = jobStore.getJob(job!.id)!;
+			await waitFor(async () => (await jobStore.getJob(job!.id))!.status !== "running", 8000, "demo job completion");
+			const done = (await jobStore.getJob(job!.id))!;
 			assert.equal(done.status, "done");
 
-			const saved = projectNative(chatStore.getChat(chat.id)!.messages);
+			const saved = projectNative((await chatStore.getChat(chat.id))!.messages);
 			const part = saved[1]!.parts.find((p) => p.type === "tool-demo");
 			assert.ok(part && part.type === "tool-demo", "demo tool part persisted");
 			assert.equal(part.state, "output-available", "the part resolved with the ack at dispatch time");
@@ -986,7 +982,7 @@ describe("demo/visual job runners", () => {
 			assert.equal((steers[0]!.details as { jobId: string }).jobId, job!.id);
 
 			// Idempotency: dispatch dedupes by toolCallId — no second job.
-			assert.equal(jobStore.listJobs(chat.id).length, 1, "no duplicate job for the same tool part");
+			assert.equal((await jobStore.listJobs(chat.id)).length, 1, "no duplicate job for the same tool part");
 		} finally {
 			demoModelOverride.current = undefined;
 			headlessOverride.current = undefined;

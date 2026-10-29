@@ -81,9 +81,9 @@ test("off cannot launch a version probe even through an otherwise authorized HTT
 
 test("a saved CLI background job is refused before model execution while opt-in is off", async (t) => {
 	setup(t);
-	const chat = chatStore.createChat("CLI opt-in job fixture");
-	t.after(() => { jobStore.deleteJobsForChat(chat.id); chatStore.deleteChat(chat.id); });
-	const job = jobStore.createJob({ kind: "research", chatId: chat.id, toolCallId: "cli-off-job" });
+	const chat = (await chatStore.createChat("CLI opt-in job fixture"));
+	t.after(async () => { (await jobStore.deleteJobsForChat(chat.id)); (await chatStore.deleteChat(chat.id)); });
+	const job = (await jobStore.createJob({ kind: "research", chatId: chat.id, toolCallId: "cli-off-job" }));
 	let calls = 0;
 	const runner = createJobRunner({ chatStore, jobStore, deliver: async () => {},
 		engineFor: () => ({ model: CLAUDE_CODE_MODELS[0]!, streamFn: () => { calls++; assert.fail("must not run a disabled CLI model"); } }),
@@ -91,7 +91,7 @@ test("a saved CLI background job is refused before model execution while opt-in 
 	});
 	await runner.runJob(job.id, { question: "Synthetic fixture only" });
 	assert.equal(calls, 0);
-	const refused = jobStore.getJob(job.id)!;
+	const refused = (await jobStore.getJob(job.id))!;
 	assert.equal(refused.status, "error");
 	assert.match(JSON.stringify(refused.result), /Enable and set it up in Settings/);
 	assert(!JSON.stringify(refused.result).includes("add one in Settings → Keys"));

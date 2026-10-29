@@ -106,9 +106,9 @@ function createFakeRun(t: TestContext, scenarios: string[][]): FakeRun {
 	return { runClaude, children, stdinFiles };
 }
 
-function createClaudeCodeChat(t: TestContext): string {
-	const chat = chatStore.createChat("Claude Code: question answered later");
-	chatStore.saveSettings(chat.id, { model: { provider: "claude-code", id: "sonnet" } });
+async function createClaudeCodeChat(t: TestContext): Promise<string> {
+	const chat = (await chatStore.createChat("Claude Code: question answered later"));
+	(await chatStore.saveSettings(chat.id, { model: { provider: "claude-code", id: "sonnet" } }));
 	t.after(() => unlinkSync(join(PATHS.chats, `${chat.id}.json`)));
 
 	return chat.id;
@@ -151,8 +151,8 @@ function toAnswerInput(): object {
 	};
 }
 
-function getLastAssistantText(chatId: string): string {
-	const messages = chatStore.getChat(chatId)?.messages ?? [];
+async function getLastAssistantText(chatId: string): Promise<string> {
+	const messages = (await chatStore.getChat(chatId))?.messages ?? [];
 	const assistant = messages.findLast((message) => message.role === "assistant");
 	assert.ok(assistant?.role === "assistant");
 
@@ -167,16 +167,16 @@ async function waitForExit(child: ChildProcessWithoutNullStreams): Promise<void>
 
 test("disabled opt-in refuses a saved CLI chat before write-ahead, liveness, or agent creation", async (t) => {
 	const fakeRun = createFakeRun(t, [toAskScenario()]);
-	const chatId = createClaudeCodeChat(t);
+	const chatId = (await createClaudeCodeChat(t));
 	writeSettings({ ...(readSettings() ?? { version: 1 }), claudeCode: { enabled: false } });
-	const before = chatStore.getChat(chatId)!.messages;
+	const before = (await chatStore.getChat(chatId))!.messages;
 	const response = await handleChatRequest(new Request("http://test/api/chat", { method: "POST", headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({ chatId, input: { type: "text", text: "must not start" } }) }), () => assert.fail("disabled work must not build an agent"));
 	assert.equal(response.status, 503);
 	assert.match((await response.json()).error, /Enable and set it up in Settings/);
 	assert.equal(isTurnRunning(chatId), false); assert.equal(fakeRun.children.length, 0);
-	assert.deepEqual(chatStore.getChat(chatId)!.messages, before);
-	assert.deepEqual(chatStore.getChat(chatId)!.settings?.model, { provider: "claude-code", id: "sonnet" });
+	assert.deepEqual((await chatStore.getChat(chatId))!.messages, before);
+	assert.deepEqual((await chatStore.getChat(chatId))!.settings?.model, { provider: "claude-code", id: "sonnet" });
 });
 
 test("switching off blocks future requests but does not interrupt an already admitted CLI turn", async (t) => {
@@ -191,7 +191,7 @@ test("switching off blocks future requests but does not interrupt an already adm
 		void once(child, "message", { signal: AbortSignal.timeout(TURN_TIMEOUT_MS) }).then(() => ready(child), failed);
 		return child;
 	};
-	const chatId = createClaudeCodeChat(t);
+	const chatId = (await createClaudeCodeChat(t));
 	const response = await handleChatRequest(new Request("http://test/api/chat", { method: "POST", headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({ chatId, input: { type: "text", text: "complete this admitted fixture" } }) }), createAgentFactory(fakeRun));
 	assert.equal(response.status, 200);
@@ -201,7 +201,7 @@ test("switching off blocks future requests but does not interrupt an already adm
 	writeSettings({ ...(readSettings() ?? { version: 1 }), claudeCode: { enabled: false } });
 	assert.equal(child.signalCode, null, "opt-out must not kill an already running process");
 	child.send("continue"); await finished;
-	assert(getLastAssistantText(chatId).length > 0, "the admitted turn completes normally");
+	assert((await getLastAssistantText(chatId)).length > 0, "the admitted turn completes normally");
 	assert.equal(readSettings()?.claudeCode?.enabled, false);
 	await waitForExit(child);
 });
@@ -211,11 +211,11 @@ test("a question answered before the idle timeout continues the waiting CLI proc
 	const run = fakeRun.runClaude;
 	fakeRun.runClaude = (args, options) => run(args, { ...options, env: { ...options.env, FAKE_CLAUDE_WINDOW: "200000" } });
 	const agentFactory = createAgentFactory(fakeRun);
-	const chatId = createClaudeCodeChat(t);
+	const chatId = (await createClaudeCodeChat(t));
 
 	await runChatTurn(chatId, { type: "text", text: "teach me sockets" }, agentFactory);
 
-	assert.equal(danglingQuestionOf(chatStore.getChat(chatId)?.messages ?? [])?.toolCallId, ASK_ID);
+	assert.equal(danglingQuestionOf((await chatStore.getChat(chatId))?.messages ?? [])?.toolCallId, ASK_ID);
 	const [waiting] = fakeRun.children;
 	assert.ok(waiting);
 	assert.equal(waiting.exitCode, null, "the CLI process should wait on the held question call");
@@ -223,9 +223,9 @@ test("a question answered before the idle timeout continues the waiting CLI proc
 	await runChatTurn(chatId, toAnswerInput(), agentFactory);
 
 	assert.equal(fakeRun.children.length, 1);
-	assert.deepEqual(cliContextWindowOf(chatStore.getChat(chatId)!.messages), { model: "claude-code:sonnet", tokens: 200000 });
+	assert.deepEqual(cliContextWindowOf((await chatStore.getChat(chatId))!.messages), { model: "claude-code:sonnet", tokens: 200000 });
 	assert.deepEqual(cliContextWindowOf(JSON.parse(readFileSync(join(PATHS.chats, `${chatId}.json`), "utf8")).messages), { model: "claude-code:sonnet", tokens: 200000 });
-	assert.ok(getLastAssistantText(chatId).includes(ANSWER_TEXT), getLastAssistantText(chatId));
+	assert.ok((await getLastAssistantText(chatId)).includes(ANSWER_TEXT), (await getLastAssistantText(chatId)));
 	await waitForExit(waiting);
 });
 
@@ -241,19 +241,19 @@ test("a question pauses later calls from the same CLI response until the learner
 	scenario.splice(scenario.length - 1, 0, JSON.stringify({ fake: "call", id: secondId, name: "ask_user_question", arguments: { question: secondQuestion } }));
 	const fakeRun = createFakeRun(t, [scenario]);
 	const factory = createAgentFactory(fakeRun);
-	const chatId = createClaudeCodeChat(t);
+	const chatId = (await createClaudeCodeChat(t));
 	await runChatTurn(chatId, { type: "text", text: "teach me sockets" }, factory);
-	assert.equal(danglingQuestionOf(chatStore.getChat(chatId)?.messages ?? [])?.toolCallId, ASK_ID);
-	assert.equal(JSON.stringify(chatStore.getChat(chatId)?.messages).includes(secondId), false, "unadmitted second question must not be posed or persisted");
+	assert.equal(danglingQuestionOf((await chatStore.getChat(chatId))?.messages ?? [])?.toolCallId, ASK_ID);
+	assert.equal(JSON.stringify((await chatStore.getChat(chatId))?.messages).includes(secondId), false, "unadmitted second question must not be posed or persisted");
 	await runChatTurn(chatId, toAnswerInput(), factory);
-	assert.equal(danglingQuestionOf(chatStore.getChat(chatId)?.messages ?? [])?.toolCallId, secondId);
+	assert.equal(danglingQuestionOf((await chatStore.getChat(chatId))?.messages ?? [])?.toolCallId, secondId);
 	await runChatTurn(chatId, {
 		type: "answer", toolCallId: secondId,
 		answer: { kind: "ask", questionText: secondQuestion, dontKnow: false, answers: [], text: "HTTP next", answeredAt: new Date().toISOString() },
 	}, factory);
 	assert.equal(fakeRun.children.length, 1);
-	assert.ok(getLastAssistantText(chatId).includes(ANSWER_TEXT));
-	assert.ok(getLastAssistantText(chatId).includes("HTTP next"));
+	assert.ok((await getLastAssistantText(chatId)).includes(ANSWER_TEXT));
+	assert.ok((await getLastAssistantText(chatId)).includes("HTTP next"));
 	await waitForExit(fakeRun.children[0]!);
 });
 
@@ -276,18 +276,18 @@ test("an individually cancelled MCP question queued behind a learner wait never 
 	);
 	const fakeRun = createFakeRun(t, [scenario]);
 	const factory = createAgentFactory(fakeRun);
-	const chatId = createClaudeCodeChat(t);
+	const chatId = (await createClaudeCodeChat(t));
 	await runChatTurn(chatId, { type: "text", text: "teach me sockets" }, factory);
-	assert.equal(danglingQuestionOf(chatStore.getChat(chatId)?.messages ?? [])?.toolCallId, ASK_ID);
+	assert.equal(danglingQuestionOf((await chatStore.getChat(chatId))?.messages ?? [])?.toolCallId, ASK_ID);
 	const child = fakeRun.children[0]!;
 	const cancelledOnServer = once(child, "message", { signal: AbortSignal.timeout(TURN_TIMEOUT_MS) });
 	child.send("queue and cancel B");
 	assert.deepEqual((await cancelledOnServer)[0], { fake: "checkpoint" });
 	await runChatTurn(chatId, toAnswerInput(), factory);
 	assert.equal(fakeRun.children.length, 1);
-	assert.equal(danglingQuestionOf(chatStore.getChat(chatId)?.messages ?? []), null);
-	assert.equal(JSON.stringify(chatStore.getChat(chatId)?.messages).includes(cancelledId), false, "cancelled B must never reach native tool execution or persistence");
-	assert.ok(getLastAssistantText(chatId).includes(ANSWER_TEXT));
+	assert.equal(danglingQuestionOf((await chatStore.getChat(chatId))?.messages ?? []), null);
+	assert.equal(JSON.stringify((await chatStore.getChat(chatId))?.messages).includes(cancelledId), false, "cancelled B must never reach native tool execution or persistence");
+	assert.ok((await getLastAssistantText(chatId)).includes(ANSWER_TEXT));
 	await waitForExit(child);
 });
 
@@ -297,7 +297,7 @@ test("a question answered after the idle timeout starts a fresh CLI process that
 
 	const fakeRun = createFakeRun(t, [toAskScenario(), readFileSync(TEXT_FIXTURE, "utf8").split("\n").filter(Boolean)]);
 	const agentFactory = createAgentFactory(fakeRun);
-	const chatId = createClaudeCodeChat(t);
+	const chatId = (await createClaudeCodeChat(t));
 
 	await runChatTurn(chatId, { type: "text", text: "teach me sockets" }, agentFactory);
 
@@ -309,7 +309,7 @@ test("a question answered after the idle timeout starts a fresh CLI process that
 	await runChatTurn(chatId, toAnswerInput(), agentFactory);
 
 	assert.equal(fakeRun.children.length, 2);
-	assert.equal(getLastAssistantText(chatId), "hello there");
+	assert.equal((await getLastAssistantText(chatId)), "hello there");
 
 	const replay = readFileSync(fakeRun.stdinFiles[1] ?? "", "utf8");
 	assert.ok(replay.includes("[tool call ask_user_question]"), replay);

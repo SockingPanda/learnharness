@@ -209,7 +209,7 @@ for (const [role, resize, expected] of [
 		], resize);
 		const originalExecute = readTool.execute;
 		const forbidden = () => { throw new Error("unexpected job dispatch or handoff"); };
-		const chatStore = { getChat: () => null };
+		const chatStore = { getChat: async () => null };
 		// Only context ports are mocked; no app/store imports or explicit
 		// tool overrides. Job/handoff operations must never execute here.
 		const agent = role === "prober"

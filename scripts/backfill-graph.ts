@@ -5,15 +5,16 @@
  *
  *   npx tsx --env-file=.env.local scripts/backfill-graph.ts
  */
-import { chatStore } from "../src/store/chats.ts";
-import { graphStore } from "../src/store/graph.ts";
+import { stores, closeStorage, effectiveSettings } from "../src/server/stores.ts";
 import { createExtractionPipeline } from "../src/agent/subagents/extraction.ts";
-import { getGraph } from "../src/core/graph.ts";
-import { effectiveSettings } from "../src/server/stores.ts";
+import { readDerivedGraph } from "../src/agent/graph-storage.ts";
+
+const { chatStore, graphStore } = stores;
 
 async function main() {
 	const only = process.argv[2]; // optional: extract just one chat id
-	const chats = only ? chatStore.listChats().filter((c) => c.id === only) : chatStore.listChats();
+	const summaries = await chatStore.listChats();
+	const chats = only ? summaries.filter((c) => c.id === only) : summaries;
 	console.log(`[backfill] ${chats.length} chats to extract`);
 	const pipeline = createExtractionPipeline({
 		chatStore,
@@ -33,10 +34,10 @@ async function main() {
 			console.error(`[backfill] ${chat.id} FAILED:`, err);
 		}
 	}
-	const graph = getGraph(graphStore);
+	const graph = await readDerivedGraph(graphStore);
 	console.log(
 		`[backfill] done: ${graph.nodes.length} nodes, ${graph.chains.length} chains`,
 	);
 }
 
-main();
+main().finally(closeStorage);

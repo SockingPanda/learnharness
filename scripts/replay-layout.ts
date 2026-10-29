@@ -12,23 +12,25 @@
  * --depth regenerates the ledger WITH inference-depth anchoring (the
  * playground mode baked into the rest state); omit it for the free layout.
  */
-import { graphStore } from "../src/store/graph.ts";
+import { stores, closeStorage } from "../src/server/stores.ts";
+const { graphStore } = stores;
 // --depth=vertical|radial: bake the playground depth mode into the ledger.
 const depthArg = process.argv.find((a) => a.startsWith("--depth="));
 const depthMode: "off" | "vertical" | "radial" =
 	depthArg === "--depth=vertical" ? "vertical" : depthArg === "--depth=radial" ? "radial" : "off";
 import { incrementalLayout } from "../src/core/layout.ts";
 import { birthSessionPartition } from "../src/core/session-clusters.ts";
-import { deriveView, getGraph } from "../src/core/graph.ts";
+import { deriveView } from "../src/core/graph.ts";
+import { readDerivedGraph } from "../src/agent/graph-storage.ts";
 import type { GraphNode, Position } from "../src/core/contracts.ts";
 
-function main() {
+async function main() {
 	const t0 = Date.now();
 
 	// CHAINS-PRIMARY (2026-09-30): the stored truth is nodes + chains; the
 	// replay lays out the DERIVED view (implication nodes included, untyped
 	// arrows) exactly like the real settle.
-	const graph = getGraph(graphStore);
+	const graph = await readDerivedGraph(graphStore);
 	const nodes = graph.nodes; // getGraph already merges lines by id
 	const view = deriveView(graph);
 	const edges = view.edges;
@@ -51,7 +53,7 @@ function main() {
 	// importedAt). A node belongs to the session of its FIRST provenance
 	// point (line order = arrival); nodes with no provenance (legacy) ride
 	// the final batch.
-	const sources = [...graphStore.readSources()].sort((a, b) => a.importedAt.localeCompare(b.importedAt));
+	const sources = [...await graphStore.readSources()].sort((a, b) => a.importedAt.localeCompare(b.importedAt));
 	const batchOf = new Map<string, string>(); // nodeId → srcId
 	for (const node of nodes) {
 		const birth = node.provenance[0]?.chatId;
@@ -59,7 +61,7 @@ function main() {
 	}
 
 	const delivered = new Set<string>();
-	let positions = new Map<string, Position>(Object.entries(graphStore.readPositions()));
+	let positions = new Map<string, Position>(Object.entries(await graphStore.readPositions()));
 	if (positions.size > 0) {
 		console.log("[replay] discarding existing positions ledger — full replay from empty");
 		positions = new Map();
@@ -132,11 +134,11 @@ function main() {
 		);
 	}
 
-	graphStore.writePositions(Object.fromEntries(positions));
+	await graphStore.writePositions(Object.fromEntries(positions));
 	console.log(
 		`[replay] done: ${positions.size} positions written in ${((Date.now() - t0) / 1000).toFixed(1)}s` +
 			` (max old-node shift within a batch: ${maxOldShift.toFixed(1)}: ${shiftReport})`,
 	);
 }
 
-main();
+main().finally(closeStorage);

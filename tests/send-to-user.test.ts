@@ -56,7 +56,7 @@ function scripted(provider: string, id: string, steps: FauxResponseStep[] = []) 
 	return { engine, faux };
 }
 
-const chatId = chatStore.createChat("Synthetic output gate").id;
+const chatId = (await chatStore.createChat("Synthetic output gate")).id;
 const factories = {
 	prober: (opts: AgentBuildOptions) => createProberAgent({ chatId, chatStore, jobStore, deliver: () => {}, spawn: () => {} }, opts),
 	teacher: (opts: AgentBuildOptions) => createTeacherAgent({ chatId, chatStore, jobStore, spawn: () => {} }, opts),
@@ -201,7 +201,7 @@ describe("send_to_user transcript projection", () => {
 });
 
 describe("send_to_user extraction and Markdown", () => {
-	it("selects output prose once and in order, preserving old fingerprints", () => {
+	it("selects output prose once and in order, preserving old fingerprints", async () => {
 		const message = assistant([fauxText("First."), outputCall("Second."), fauxThinking("Hidden."), outputCall("Third.", "send-2")]);
 		const messages = [message, ack(), ack("send-2")];
 		assert.deepEqual(messageViewLines(message, "a1"), ["TEACHER [a1] First.", "TEACHER [a1] Second.", "TEACHER [a1] Third."]);
@@ -209,19 +209,19 @@ describe("send_to_user extraction and Markdown", () => {
 		assert.equal(coverageOf(messages, [], "fixture").uncoveredCount, 1);
 		const md = sessionMarkdown(messages, { anchors: false });
 		assert.equal(md, "### Teacher\n\nFirst.\n\n### Teacher\n\nSecond.\n\n### Teacher\n\nThird.");
-		const record = chatStore.createChat("Synthetic extraction");
+		const record = (await chatStore.createChat("Synthetic extraction"));
 		assert.equal(transcriptView({ ...record, messages }), "# Synthetic extraction\n\nTEACHER [a1] First.\n\nTEACHER [a1] Second.\n\nTEACHER [a1] Third.");
 		const legacy = assistant([fauxText("Old text."), fauxThinking("Old thinking.")], "legacy");
 		const oldFingerprint = createHash("sha256").update(JSON.stringify(["assistant", ["TEACHER [legacy] Old text."]])).digest("hex");
 		assert.equal(messageFingerprint(legacy), oldFingerprint, "no re-extraction/migration of legacy prose");
 	});
 
-	it("does not extract/export failed output calls, including partial calls from truncated responses", () => {
+	it("does not extract/export failed output calls, including partial calls from truncated responses", async () => {
 		const message = assistant([fauxText("Keep this."), outputCall("Do not treat this as delivered.")]);
 		const messages = [message, ack("send-1", true)];
 		assert.deepEqual(teacherProseBlocks(messages), ["Keep this."]);
 		assert.equal(sessionMarkdown(messages, { anchors: false }), "### Teacher\n\nKeep this.");
-		const record = chatStore.createChat("Failed output fixture");
+		const record = (await chatStore.createChat("Failed output fixture"));
 		assert.ok(!transcriptView({ ...record, messages }).includes("Do not treat"));
 		const coverage = coverageOf([assistant([outputCall()]), ack("send-1", true)], [], "fixture");
 		assert.equal(coverage.uncoveredCount, 0);
@@ -334,19 +334,19 @@ describe("send_to_user native flow (offline)", () => {
 				fauxToolCall("quiz", quiz, { id: "quiz-1" }),
 			], { stopReason: "toolUse" }),
 		]);
-		const chat = chatStore.createChat("Synthetic native output flow");
+		const chat = (await chatStore.createChat("Synthetic native output flow"));
 		const user = newUserMessage("Explain synthetic arithmetic.");
-		chatStore.saveMessages(chat.id, [user]);
+		(await chatStore.saveMessages(chat.id, [user]));
 		const agent = createTeacherAgent(undefined, { engine, messages: asAgentMessages([user]) });
 		const handle = runPiTurn({
 			agent,
 			updateFlushMs: 0,
-			onFinish: (messages, aborted) => { persistTurn(chatStore, chat.id, 1, messages, aborted); },
+			onFinish: async (messages, aborted) => { (await persistTurn(chatStore, chat.id, 1, messages, aborted)); },
 		});
 		const wire = await new Response(handle.subscribe()).text();
 		assert.ok(wire.endsWith("data: [DONE]\n\n"));
 		assert.equal(faux.state.callCount, 1, "question stops the mixed batch as before");
-		const saved = chatStore.getChat(chat.id)!.messages;
+		const saved = (await chatStore.getChat(chat.id))!.messages;
 		const response = saved.find((m) => m.role === "assistant")!;
 		assert.equal(response.role, "assistant");
 		if (response.role !== "assistant") assert.fail("missing assistant");

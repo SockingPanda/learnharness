@@ -6,7 +6,7 @@ import { ModelsNotConfiguredError, ProviderKeyMissingError } from "../src/core/s
 import { createExtractionPipeline, NotesImportError } from "../src/agent/subagents/extraction.ts";
 import { createFauxCore, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { stores } from "../src/server/stores.ts";
-import type { GraphStore } from "../src/core/ports.ts";
+import { asyncGraphStore } from "./graph-test-adapters.ts";
 import type { GraphNode, GraphChain, NotesSource, SessionCheckpoint } from "../src/core/contracts.ts";
 
 const original = extraction.importNotes;
@@ -59,7 +59,7 @@ it("real route plus in-memory ledgers and faux stages reprocess identical import
 	const chains: GraphChain[] = [];
 	const checkpoints: SessionCheckpoint[] = [];
 	const sources = new Map<string, NotesSource>();
-	const graphStore: GraphStore = {
+	const graphStore = asyncGraphStore({
 		appendNode: (node) => { nodes.push(node); }, readNodes: () => [...nodes],
 		appendChain: (chain) => { chains.push(chain); }, readChains: () => [...chains],
 		appendCheckpoint: (checkpoint) => { checkpoints.push(checkpoint); }, readCheckpoints: () => [...checkpoints],
@@ -68,7 +68,7 @@ it("real route plus in-memory ledgers and faux stages reprocess identical import
 		readSources: () => [...sources.values()],
 		appendSourceUsage: (id, usage) => { sources.get(id)!.extractions!.push(usage); },
 		readPositions: () => ({}), writePositions: () => {}, rewriteLedgers: () => {},
-	};
+	});
 	let calls = 0;
 	const pipeline = createExtractionPipeline({ chatStore: stores.chatStore, graphStore,
 		engineFor: (role) => {

@@ -187,7 +187,7 @@ describe("keyless researcher loop", () => {
 function fakeJobStore(): JobStore {
 	const jobs = new Map<string, JobRecord>();
 	return {
-		createJob(init) {
+		async createJob(init) {
 			const job: JobRecord = {
 				id: `job_${jobs.size + 1}`,
 				kind: init.kind,
@@ -201,15 +201,15 @@ function fakeJobStore(): JobStore {
 			jobs.set(job.id, job);
 			return job;
 		},
-		getJob: (id) => jobs.get(id) ?? null,
-		updateJob: (id, patch) => {
+		getJob: async (id) => jobs.get(id) ?? null,
+		updateJob: async (id, patch) => {
 			const job = jobs.get(id);
 			if (!job) return null;
 			return Object.assign(job, patch);
 		},
-		listJobs: () => [...jobs.values()],
-		findJobByToolCallId: () => null,
-		deleteJobsForChat: () => 0, // the drop tests never delete
+		listJobs: async () => [...jobs.values()],
+		findJobByToolCallId: async () => null,
+		deleteJobsForChat: async () => 0, // the drop tests never delete
 	};
 }
 
