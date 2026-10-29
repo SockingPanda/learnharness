@@ -6,9 +6,10 @@
  * outside that the docs require us to copy: public/ and .next/static/.
  * This script finishes the job and sanity-checks the result — including
  * the exclusion that keeps the repo's real data/ OUT of the bundle
- * (see next.config.ts outputFileTracingExcludes). It also removes two
- * exact build-only paths the tracer sweeps in: old installers and the
- * development Electron runtime. Broad trace exclusions break externals.
+ * (see next.config.ts outputFileTracingExcludes). It also removes exact
+ * build-only paths the tracer sweeps in: old installers and the
+ * development Electron runtime and cached Any distributions. Broad trace
+ * exclusions break externals.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -69,7 +70,9 @@ for (const secret of ["auth.json", ...subscriptionSecrets, ".env", ".env.local"]
 // generic dist/** earlier broke pi-ai / pi-agent-core's runtime dist/.
 // Never touch ROOT/dist or ROOT/node_modules/electron (the running app
 // and the build runtime); native canvas/resvg packages stay untouched.
-for (const extra of ["dist", path.join("node_modules", "electron")]) {
+// Any is shipped once as platform-specific extraResources/any. The server
+// must not inherit the build cache (including other operating systems).
+for (const extra of ["dist", path.join("node_modules", "electron"), path.join("vendor", "any")]) {
 	const target = path.join(STANDALONE, extra);
 	if (exists(target)) {
 		fs.rmSync(target, { recursive: true, force: true });

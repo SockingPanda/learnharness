@@ -37,9 +37,13 @@ function withPayload(test: (fixture: {
 }
 
 describe("desktop standalone payload", () => {
-	it("removes only traced installers/dev Electron, preserving runtime dist/ and native binaries", () => {
+	it("removes traced installers, dev Electron and Any build cache, preserving runtime dist/ and native binaries", () => {
 		withPayload(({ root, write, run }) => {
-			for (const extra of [path.join("dist", "old.app", "nested.dmg"), path.join("node_modules", "electron", "dist", "electron.exe")]) {
+			const buildOnly = [
+				path.join("dist", "old.app", "nested.dmg"), path.join("node_modules", "electron", "dist", "electron.exe"),
+				"vendor/any/darwin-arm64/any", "vendor/any/linux-x64/any", "vendor/any/win32-x64/any.exe",
+			];
+			for (const extra of buildOnly) {
 				// BOTH copies exist: curation must not touch the real repo's build/runtime.
 				write(extra);
 				write(path.join(STANDALONE, extra));
@@ -56,6 +60,8 @@ describe("desktop standalone payload", () => {
 			assert.equal(result.status, 0, String(result.stderr));
 			assert.equal(fs.existsSync(path.join(root, STANDALONE, "dist")), false);
 			assert.equal(fs.existsSync(path.join(root, STANDALONE, "node_modules", "electron")), false);
+			assert.equal(fs.existsSync(path.join(root, STANDALONE, "vendor", "any")), false);
+			for (const extra of buildOnly) assert.ok(fs.existsSync(path.join(root, extra)), extra);
 			assert.ok(fs.existsSync(path.join(root, "dist", "old.app", "nested.dmg")));
 			assert.ok(fs.existsSync(path.join(root, "node_modules", "electron", "dist", "electron.exe")));
 			for (const file of runtime) assert.ok(fs.existsSync(path.join(root, STANDALONE, file)), file);
