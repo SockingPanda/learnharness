@@ -12,7 +12,10 @@ export function markUnadmittedUsage(usage: object): void { unadmittedUsage.add(u
 export function usageWasAdmitted(usage: object): boolean { return !unadmittedUsage.has(usage); }
 export interface SubscriptionDispatchLifecycle {
  captured(scope: AdmissionScope): void;
- beforeDispatch(scope: AdmissionScope): void;
+ /** Prepare the durable input prefix. This does not admit a model request. */
+ beforeDispatch(scope: AdmissionScope): void | Promise<void>;
+ /** Called synchronously after the transport has invoked its fetch delegate. */
+ didDispatch?(scope: AdmissionScope): void;
  noDispatch(kind: NoDispatchKind): void;
 }
 interface CycleOptions {
@@ -21,7 +24,7 @@ interface CycleOptions {
  foregroundOwed: boolean;
  purpose: { background: boolean };
  scopeCurrent: (scope: AdmissionScope) => boolean;
- commitStaged?: () => void;
+ commitStaged?: () => void | Promise<void>;
  restoreAutomatic: (automaticIds: ReadonlySet<string>, retainedIds: ReadonlySet<string>) => void;
 }
 const idOf = (m: AgentMessage) => (m as { id?: string }).id;
@@ -41,6 +44,11 @@ export class SubscriptionRequestCycle implements SubscriptionDispatchLifecycle {
  private resumed = false;
  private userAborted = false;
  private stagedCommitted = false;
+ private stagedAwaitingDispatch = false;
+ private durableStaged = new Set<string>();
+ private preparing = false;
+ private prepared = false;
+ private generation = 0;
  private started = false;
  private anyDispatch = false;
  private firstResolved = false;
@@ -74,7 +82,7 @@ export class SubscriptionRequestCycle implements SubscriptionDispatchLifecycle {
   if (event.type === "agent_start") { if (this.started) return true; this.started = true; return false; }
   if (event.type === "agent_end") return true; // settle only after native activeRun is cleared
   if (event.type === "turn_start") {
-   this.committed = false; this.denied = undefined; this.scope = undefined;
+   this.committed = false; this.prepared = false; this.denied = undefined; this.scope = undefined; this.generation++;
    // A retained learner batch from the denied cycle already owns its turn_start.
    if (!this.held.some((e) => e.type === "turn_start")) this.held.push(event);
    return true;
@@ -87,14 +95,40 @@ export class SubscriptionRequestCycle implements SubscriptionDispatchLifecycle {
   this.scope = { ...scope };
   this.originalScope ??= { ...scope };
  }
- beforeDispatch(scope: AdmissionScope): void {
-  if (this.userAborted || this.denied || this.committed || !this.scope || JSON.stringify(scope) !== JSON.stringify(this.scope) || !this.options.scopeCurrent(scope)) throw new Error("Subscription admission cancelled");
-  if (!this.stagedCommitted && (this.options.staged?.length ?? 0) > 0) {
-   this.options.commitStaged?.(); // synchronous durable prefix, before visibility and fetch
-   this.stagedCommitted = true;
+ async beforeDispatch(scope: AdmissionScope): Promise<void> {
+  if (this.preparing || this.prepared) throw new Error("Subscription admission already pending");
+  const generation = this.generation;
+  const check = () => {
+   if (this.userAborted || this.denied || this.committed || generation !== this.generation || !this.scope || JSON.stringify(scope) !== JSON.stringify(this.scope) || !this.options.scopeCurrent(scope)) throw new Error("Subscription admission cancelled");
+  };
+  check();
+  this.preparing = true;
+  try {
+   if (!this.stagedCommitted && (this.options.staged?.length ?? 0) > 0) {
+    const staged = this.options.staged!;
+    await this.options.commitStaged?.();
+    // Saving and dispatching are separate facts. Even if authorization was
+    // revoked during the save, these messages must never be queued again.
+    this.stagedCommitted = true;
+    this.stagedAwaitingDispatch = true;
+    for (const message of staged) { const id = idOf(message); if (id) this.durableStaged.add(id); }
+   }
+   check();
+   this.prepared = true;
+  } finally { this.preparing = false; }
+ }
+ didDispatch(scope: AdmissionScope): void {
+  // The transport rechecks authority immediately before invoking fetch.
+  // Do not reclassify an already dispatched request if the delegate itself
+  // synchronously invalidates the connection (an admitted abort).
+  if (!this.prepared || this.committed || !this.scope || JSON.stringify(scope) !== JSON.stringify(this.scope)) throw new Error("Subscription dispatch was not prepared");
+  this.prepared = false;
+  this.stagedAwaitingDispatch = false;
+  if (this.stagedCommitted && this.options.staged?.length) {
    const stagedEvents: AgentEvent[] = this.options.staged!.flatMap((message) => [{ type: "message_start" as const, message }, { type: "message_end" as const, message }]);
    const boundary = this.held.findIndex((event) => event.type === "turn_start");
    this.held.splice(boundary < 0 ? 0 : boundary + 1, 0, ...stagedEvents);
+   this.options.staged = undefined;
   }
   this.committed = true; this.anyDispatch = true; this.foregroundOwed = false;
   this.inheritedBackground = this.options.purpose.background;
@@ -108,12 +142,13 @@ export class SubscriptionRequestCycle implements SubscriptionDispatchLifecycle {
  private resolveFirst(value: boolean) { if (!this.firstResolved) { this.firstResolved = true; this.resolveAdmission(value); } }
  finishNativeCycle(): { action: "settle" | "resumeForeground"; messages: AgentMessage[] } {
   if (!this.denied) { this.resolveFirst(this.anyDispatch); return { action: "settle", messages: [] }; }
-  const messages = this.snapshot.filter((m) => !this.automatic.has(idOf(m) ?? ""));
+  const restorable = new Set([...this.automatic].filter((id) => !this.durableStaged.has(id)));
+  const messages = this.snapshot.filter((m) => !restorable.has(idOf(m) ?? ""));
   const retainedIds = new Set(messages.map(idOf).filter((id): id is string => !!id));
-  this.options.restoreAutomatic(this.automatic, retainedIds);
+  if (restorable.size) this.options.restoreAutomatic(restorable, retainedIds);
   this.resolveFirst(false); // queue deferral is installed before initial fire cargo returns
   this.held = this.held.filter((e) => (e.type === "turn_start") || ((e.type === "message_start" || e.type === "message_end") && e.message.role !== "assistant" && !this.automatic.has(idOf(e.message) ?? "")));
-  const retry = this.denied === "background" && !this.userAborted && !this.resumed && this.foregroundOwed && !!this.scope && this.options.scopeCurrent(this.scope);
+  const retry = this.denied === "background" && !this.stagedAwaitingDispatch && !this.userAborted && !this.resumed && this.foregroundOwed && !!this.scope && this.options.scopeCurrent(this.scope);
   if (retry) {
    this.resumed = true; this.options.purpose.background = false;
    this.seen = retainedIds;

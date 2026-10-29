@@ -3,9 +3,10 @@ import { after, before, test } from "node:test";
 import { normalizeContext, type Api, type AssistantMessage, type Model } from "@earendil-works/pi-ai";
 import { piModels, piEngineForSpec } from "../src/agent/models.ts";
 import { NATIVE_SUBSCRIPTIONS, type NativeSubscriptionSnapshot } from "../src/core/contracts/subscriptions.ts";
-import { refreshSubscriptionModels, nativeSubscriptionModels, subscriptionAbortController, subscriptionRequest } from "../src/agent/subscription-bridge.ts";
+import { refreshSubscriptionModels, nativeSubscriptionModels, subscriptionAbortController, subscriptionRequest, nativeAdmissionCurrent } from "../src/agent/subscription-bridge.ts";
 import { subscriptionHistory } from "../src/agent/subscription-stream.ts";
 import { runSubagent } from "../src/agent/subagents/pi-run.ts";
+import { SubscriptionRequestCycle, type SubscriptionDispatchLifecycle } from "../src/agent/subscription-request-cycle.ts";
 
 const originalSend = Object.getOwnPropertyDescriptor(process, "send"), originalConnected = Object.getOwnPropertyDescriptor(process, "connected");
 const marker = process.env.LH_DESKTOP_SERVER, secret = process.env.LH_DESKTOP_API_SECRET;
@@ -99,6 +100,51 @@ test("background invalidation is provider-specific and preserves foreground cont
 	assert(!foreground.controller.signal.aborted); assert(background.controller.signal.aborted); assert(!other.controller.signal.aborted);
 	const stale = snapshot(); stale.statuses.forEach((s) => { s.revision = 0; }); emit({ channel: "lh:subscriptions", op: "changed", snapshot: stale });
 	foreground.release(); background.release(); other.release();
+});
+for (const provider of NATIVE_SUBSCRIPTIONS) for (const interrupt of ["abort", "after-save", "background", "account", "save-failure"] as const) test(`${provider.providerId}: ${interrupt} during durable staging never dispatches or redelivers saved input`, { timeout: 5000 }, async () => {
+	revision++; await refreshSubscriptionModels();
+	const selected = piModels().getModels(provider.providerId)[0]!;
+	const marker = { id: "durable-auto", role: "custom" as const, customType: "subagent-steer" as const, content: "Saved automatic result", details: { jobId: "fixture-job" }, display: true, timestamp: 1 };
+	let entered!: () => void, finish!: () => void;
+	const enteredSave = new Promise<void>((resolve) => { entered = resolve; });
+	const save = new Promise<void>((resolve) => { finish = resolve; });
+	let writes = 0, requests = 0, restored = 0, visible = 0;
+	const controller = new AbortController();
+	const cycle = new SubscriptionRequestCycle({
+		initialMessages: [marker], staged: [marker], foregroundOwed: true, purpose: { background: true },
+		scopeCurrent: (scope) => nativeAdmissionCurrent(provider.providerId, scope),
+		commitStaged: async () => { entered(); await save; if (interrupt === "save-failure") throw new Error("fixture save failure"); writes++; },
+		restoreAutomatic: (ids) => { restored++; assert(ids.has(marker.id)); },
+	});
+	cycle.bindRelease(() => { visible++; });
+	cycle.hold({ type: "turn_start" });
+	cycle.prepare({ context: { messages: [marker] } } as Parameters<typeof cycle.prepare>[0]);
+	const lifecycle: SubscriptionDispatchLifecycle = {
+		captured: (scope) => cycle.captured(scope),
+		beforeDispatch: async (scope) => { await cycle.beforeDispatch(scope); if (interrupt === "after-save") controller.abort(); },
+		didDispatch: (scope) => cycle.didDispatch(scope),
+		noDispatch: (kind) => cycle.noDispatch(kind),
+	};
+	const engine = piEngineForSpec({ provider: provider.logicalId, id: selected.id }, true, lifecycle);
+	const result = engine.streamFn(engine.model, context, {
+		signal: controller.signal,
+		fetch: async () => { requests++; throw new Error("must not reach a provider"); },
+	}).result();
+	await enteredSave;
+	assert.equal(requests, 0); assert.equal(writes, 0); assert.equal(visible, 0);
+	if (interrupt === "abort") { controller.abort(); cycle.abort(); }
+	if (interrupt === "background" || interrupt === "account") {
+		revision++; const changed = snapshot(); const status = changed.statuses.find((entry) => entry.providerId === provider.providerId)!;
+		if (interrupt === "background") status.allowBackgroundUse = false;
+		else { status.connectionId = "different-account"; status.epoch++; status.authorityRevision++; }
+		emit({ channel: "lh:subscriptions", op: "changed", snapshot: changed });
+	}
+	finish(); await result;
+	assert.equal(cycle.finishNativeCycle().action, "settle");
+	assert.equal(await cycle.admission, false); assert.equal(cycle.dispatched, false);
+	assert.equal(requests, 0); assert.equal(visible, 0);
+	assert.equal(writes, interrupt === "save-failure" ? 0 : 1);
+	assert.equal(restored, interrupt === "save-failure" ? 1 : 0);
 });
 test("framework IPC alone cannot request subscription credentials or retain a usable catalog", async () => {
 	const previous = sends; delete process.env.LH_DESKTOP_SERVER;

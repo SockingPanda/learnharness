@@ -56,6 +56,7 @@ export function chatGPTStream(background: () => boolean, lifecycle?: ChatGPTDisp
 			let failure = "";
 			let scope: AdmissionScope | undefined;
 			let committed = false;
+			let dispatchPending = false;
 			let terminal = false;
 			const check = () => { if (signal.aborted || !scope || !chatGPTScopeCurrent(scope)) throw new Error("cancelled or catalog authority changed"); };
 			try {
@@ -74,12 +75,19 @@ export function chatGPTStream(background: () => boolean, lifecycle?: ChatGPTDisp
 					signal,
 					maxRetries: 0,
 					headers: { "OpenAI-Beta": null, ...options?.headers },
-					fetch: (input, init) => {
+					fetch: async (input, init) => {
 						check();
-						if (committed) throw new Error("ChatGPT does not retry admitted requests");
-						lifecycle?.beforeDispatch(scope!);
-						committed = true;
-						return delegate(input, init);
+						if (committed || dispatchPending) throw new Error("ChatGPT does not retry admitted requests");
+						dispatchPending = true;
+						try {
+							await lifecycle?.beforeDispatch(scope!);
+							check();
+							committed = true;
+							let response: ReturnType<typeof delegate>;
+							try { response = delegate(input, init); }
+							finally { lifecycle?.didDispatch?.(scope!); }
+							return await response;
+						} finally { dispatchPending = false; }
 					},
 					onPayload: async (raw, model) => {
 						const replacement = await options?.onPayload?.(raw, model);

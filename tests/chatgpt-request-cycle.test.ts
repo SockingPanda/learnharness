@@ -23,7 +23,7 @@ const realFetch = globalThis.fetch;
 const desktopMarker = process.env.LH_DESKTOP_SERVER, desktopSecret = process.env.LH_DESKTOP_API_SECRET;
 const model = piModels().getModel("openai", "gpt-5") as Model<"openai-responses">;
 let epoch = 1, revision = 1, background = true;
-let cut: "lease" | "payload" | "full" | "afterFetch" | "none" = "none";
+let cut: "lease" | "payload" | "full" | "afterFetch" | "save" | "saveFull" | "saveAbort" | "none" = "none";
 let leases: boolean[] = [], fetches = 0, toolFirst = false;
 const status = () => ({ available: true, pending: false, allowBackgroundUse: background, activeId: "scratch", accounts: [{ id: "scratch", registration: "oaiapp_scratch", email: "dummy@example.invalid", connected: true, planEnabled: true, background: !background }], error: null });
 const ipc = (m: unknown) => (process.emit as (name: string, m: unknown) => boolean)("message", m);
@@ -79,7 +79,14 @@ async function nativeRun(where: typeof cut, staged: boolean, withLearner = true,
  let final: AgentMessage[] = [];
  let resolve!: () => void; const finished = new Promise<void>((done) => { resolve = done; });
  const cycle = new ChatGPTRequestCycle({ initialMessages: messages, staged: staged ? [marker] : undefined, foregroundOwed: !staged, purpose, scopeCurrent: chatGPTScopeCurrent,
-  commitStaged: () => { if (commitThrows) throw new Error("scratch durable write failure"); committed++; },
+  commitStaged: async () => {
+   await Promise.resolve();
+   assert.equal(fetches, 0, "durable staging must finish before dispatch");
+   if (commitThrows) throw new Error("scratch durable write failure");
+   committed++;
+   if (cut === "save" || cut === "saveFull") { const full = cut === "saveFull"; cut = "none"; revoke(full); }
+   if (cut === "saveAbort") { cut = "none"; cycle.abort(); }
+  },
   restoreAutomatic: (ids, retained) => { restored++; assert(ids.has(marker.id)); assert(!retained.has(marker.id)); agent.clearSteeringQueue(); },
  });
  const raw = piEngineForSpec({ provider: "chatgpt", id: model.id }, () => purpose.background, cycle);
@@ -122,6 +129,35 @@ test("successful staged prefix commits once before native dispatch and is visibl
 });
 test("durable staged input failure prevents dispatch and does not infer foreground replay", async () => {
  const r = await nativeRun("none", true, false, true); assert.equal(r.fetches, 0); assert.equal(r.usage, 0); assert.equal(await r.cycle.admission, false);
+});
+for (const where of ["save", "saveFull", "saveAbort"] as const) test(`${where}: saved staged input survives denial without dispatch, foreground replay or duplicate delivery`, async () => {
+ const r = await nativeRun(where, true, true);
+ assert.equal(r.committed, 1);
+ assert.equal(r.fetches, 0); assert.equal(r.usage, 0); assert.equal(r.restored, 0);
+ assert.equal(await r.cycle.admission, false);
+ assert.deepEqual(r.leases, [true]);
+ assert.equal(r.events.filter((event) => (event.type === "message_start" || event.type === "message_end") && (event.message as { id?: string }).id === "auto").length, 0);
+});
+test("concurrent admission hooks cannot persist or admit a staged prefix twice", async () => {
+ let release!: () => void;
+ const gate = new Promise<void>((resolve) => { release = resolve; });
+ let saves = 0;
+ const marker = automatic();
+ const scope = { accountId: "concurrent", epoch: 1, authorityRevision: 1, selectedModelId: model.id };
+ const cycle = new ChatGPTRequestCycle({
+  initialMessages: [marker], staged: [marker], foregroundOwed: false,
+  purpose: { background: true }, scopeCurrent: () => true,
+  commitStaged: async () => { saves++; await gate; }, restoreAutomatic: () => assert.fail("must not restore a committed prefix"),
+ });
+ cycle.hold({ type: "turn_start" }); cycle.captured(scope);
+ const first = cycle.beforeDispatch(scope);
+ await assert.rejects(cycle.beforeDispatch(scope), /already pending/);
+ assert.equal(saves, 1); assert.equal(cycle.dispatched, false);
+ release(); await first;
+ assert.equal(cycle.dispatched, false, "prepared data is not an admitted request");
+ cycle.didDispatch(scope);
+ assert.equal(await cycle.admission, true); assert.equal(saves, 1);
+ await assert.rejects(cycle.beforeDispatch(scope), /cancelled/);
 });
 test("invalidation after fetch commitment cannot replay an admitted request", async () => {
  const r = await nativeRun("afterFetch", false); assert.equal(r.fetches, 1); assert.equal(r.restored, 0); assert.deepEqual(r.leases, [true]); assert.equal(await r.cycle.admission, true);

@@ -36,7 +36,7 @@ export function nativeSubscriptionStream(provider: Provider, background: () => b
 		const signal = options?.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
 		void (async () => {
 			let partial = empty(logicalModel), scope: NativeSubscriptionScope | undefined;
-			let committed = false, terminal = false;
+			let committed = false, dispatchPending = false, terminal = false;
 			const check = () => {
 				if (signal.aborted || !scope || !subscriptionScopeCurrent(scope)) throw new Error("cancelled or connection changed");
 				if (purpose && !nativeSubscriptionBackgroundAllowed(nativeId)) throw new Error("background use disabled");
@@ -53,9 +53,18 @@ export function nativeSubscriptionStream(provider: Provider, background: () => b
 				const fetch = options?.fetch ?? globalThis.fetch;
 				const source = provider.streamSimple(transport, subscriptionHistory(normalizeContext(context), logicalModel, nativeId), {
 					...options, apiKey: auth.apiKey, headers: { ...options?.headers, ...auth.headers }, signal, maxRetries: 0,
-					fetch: (input, init) => {
-						check(); if (committed) throw new Error("Subscription requests do not retry after dispatch");
-						lifecycle?.beforeDispatch(subscriptionAdmissionScope(scope!)); committed = true; return fetch(input, init);
+					fetch: async (input, init) => {
+						check(); if (committed || dispatchPending) throw new Error("Subscription requests do not retry after dispatch");
+						dispatchPending = true;
+						try {
+							await lifecycle?.beforeDispatch(subscriptionAdmissionScope(scope!));
+							check();
+							committed = true;
+							let response: ReturnType<typeof fetch>;
+							try { response = fetch(input, init); }
+							finally { lifecycle?.didDispatch?.(subscriptionAdmissionScope(scope!)); }
+							return await response;
+						} finally { dispatchPending = false; }
 					},
 					onPayload: async (raw, model) => {
 						const replacement = await options?.onPayload?.(raw, model); check();
