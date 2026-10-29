@@ -19,3 +19,6 @@ xai-credentials.json*
 
 # dev-fresh launcher scratch (fresh-user sim): disposable per launch
 .fresh-data/
+
+# Pinned Any release artifacts, fetched and checksum-verified at build time.
+vendor/any/

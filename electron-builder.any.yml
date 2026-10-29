@@ -1,0 +1,26 @@
+# Independent opt-in preview; inherits only the ordinary desktop payload/platform settings.
+extends: ./electron-builder.yml
+appId: com.sockingpanda.learnharness.anypreview
+productName: LearnHarness Any Preview
+directories:
+  output: dist/any-preview
+extraMetadata:
+  name: learnharness-any-preview
+  desktopName: learnharness-any-preview.desktop
+  lhAnyPreview: true
+publish: null
+mac:
+  extraResources:
+    - from: vendor/any/darwin-${arch}
+      to: any
+  electronLanguages:
+    - en
+    - zh_CN
+win:
+  extraResources:
+    - from: vendor/any/win32-${arch}
+      to: any
+linux:
+  extraResources:
+    - from: vendor/any/linux-${arch}
+      to: any

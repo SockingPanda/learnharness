@@ -24,13 +24,14 @@
  *     would shadow every settings-page key change until restart.
  */
 
-const { app, BrowserWindow, Menu, ipcMain, session, shell } = require("electron");
+const { app, BrowserWindow, Menu, ipcMain, session, shell, dialog } = require("electron");
 const { createChatGPT, fileStore } = require("./chatgpt.cjs");
 const { attachChatGPTChild, trustedSender, chatGPTControl } = require("./chatgpt-ipc.cjs");
 const { createSubscriptions, loadSubscriptionSDK } = require("./subscriptions.cjs");
 const { attachSubscriptionChild, subscriptionControl } = require("./subscription-ipc.cjs");
 const { desktopAPIHeaders } = require("./desktop-api.cjs");
 const { openWebSubscriptionBrowser } = require("./web-subscription-browser.cjs");
+const { startAnySupervisor } = require("./any-host.cjs");
 const { randomBytes } = require("node:crypto");
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
@@ -42,7 +43,8 @@ const path = require("node:path");
 // renderer owns the number; this is the IPC widen target).
 const SIDEBAR_AUTOCLOSE = 928;
 
-const PRODUCT_NAME = "LearnHarness";
+const ANY_PREVIEW = require("../package.json").lhAnyPreview === true || process.env.LH_ANY_PREVIEW === "1";
+const PRODUCT_NAME = ANY_PREVIEW ? "LearnHarness Any Preview" : "LearnHarness";
 
 // APP NAME → userData (owner, 2026-10-10): the Application Support dir is
 // exactly "LearnHarness" in dev AND packaged. Packaged Electron would
@@ -51,6 +53,7 @@ const PRODUCT_NAME = "LearnHarness";
 // Must run before the LH_DEV_URL suffix below — dev becomes
 // "LearnHarness-dev".
 app.setName(PRODUCT_NAME);
+if (ANY_PREVIEW && process.platform === "win32") app.setAppUserModelId?.("com.sockingpanda.learnharness.anypreview");
 const AUTH_FILE = () => path.join(app.getPath("userData"), "auth.json");
 const DATA_DIR = () => path.join(app.getPath("userData"), "data");
 
@@ -58,6 +61,7 @@ const DATA_DIR = () => path.join(app.getPath("userData"), "data");
  *  In dev LH_DEV_URL short-circuits everything: no spawn, no packaging —
  *  the window points at the running `next dev` server (full HMR). */
 function serverEntry() {
+	if (ANY_PREVIEW && !app.isPackaged) return path.resolve(__dirname, "../.next/standalone/server.js");
 	// extraResources ships the whole .next payload under server/standalone/
 	// (copied from .next with an explicit filter — see electron-builder.yml).
 	return path.join(process.resourcesPath, "server", "standalone", "server.js");
@@ -130,11 +134,23 @@ if (process.argv.includes("--browser-service")) {
 				win.focus();
 			}
 		});
-		main();
+		main().catch(async (error) => {
+			log(`startup failed: ${error.message}`);
+			if (ANY_PREVIEW) await stopPreview();
+			dialog.showErrorBox(PRODUCT_NAME, error.message);
+			app.quit();
+		});
 	}
 }
 
 let serverProcess = null;
+let serverShutdown = null;
+let anyRuntime = null;
+let ownedServerUrl = null;
+let previewStopping = false;
+let previewStopped = false;
+let previewStopPromise = null;
+let previewFailureShown = false;
 let chatgpt = null;
 let chatgptChild = null;
 let subscriptions = null;
@@ -205,7 +221,7 @@ function startServer(port) {
 			// Only the macOS backend needs this: Next's native title setter
 			// otherwise checks this Node-mode process in as a foreground app.
 			process.platform === "darwin"
-				? ["--require", path.join(process.resourcesPath, "server-title-guard.cjs"), serverEntry()]
+				? ["--require", ANY_PREVIEW && !app.isPackaged ? path.join(__dirname, "server-title-guard.cjs") : path.join(process.resourcesPath, "server-title-guard.cjs"), serverEntry()]
 				: [serverEntry()],
 			{
 				cwd: path.dirname(serverEntry()),
@@ -222,6 +238,13 @@ function startServer(port) {
 					LH_AUTH_FILE: AUTH_FILE(),
 					LH_DESKTOP_SERVER: "1",
 					LH_DESKTOP_API_SECRET: desktopAPISecret,
+					LH_STORAGE_BACKEND: ANY_PREVIEW ? "any" : "fs",
+					...(ANY_PREVIEW ? {
+						LH_ANY_URL: anyRuntime.url,
+						LH_ANY_ACCOUNT_ID: anyRuntime.accountId,
+						LH_ANY_DATA_DIR: anyRuntime.dataDir,
+						NO_PROXY: `${process.env.NO_PROXY ?? process.env.no_proxy ?? ""},127.0.0.1,localhost,::1`,
+					} : {}),
 				},
 				stdio: ["ignore", "pipe", "pipe", "ipc"],
 			},
@@ -241,6 +264,7 @@ function startServer(port) {
 			subscriptionChild = null;
 			chatgpt?.close();
 			subscriptions?.close();
+			if (ANY_PREVIEW && !previewStopping) previewFailed("The application service stopped. Restart LearnHarness Any Preview.");
 		});
 		resolve(child);
 	});
@@ -266,17 +290,65 @@ function waitUntilUp(url, tries = 150) {
 function killServer() {
 	chatgpt?.close();
 	subscriptions?.close();
-	if (!serverProcess) return;
+	if (!serverProcess) return serverShutdown ?? Promise.resolve();
 	const child = serverProcess;
 	serverProcess = null;
-	child.kill("SIGTERM");
-	setTimeout(() => {
-		try {
-			child.kill("SIGKILL");
-		} catch {
-			/* already gone */
+	serverShutdown = new Promise((resolve) => {
+		const timer = setTimeout(() => {
+			try { child.kill("SIGKILL"); } catch { /* already gone */ }
+		}, 3000);
+		child.once("exit", () => { clearTimeout(timer); resolve(); });
+		child.kill("SIGTERM");
+	});
+	return serverShutdown;
+}
+
+/** Preview shutdown keeps Any alive until its business server has stopped writing. */
+function stopPreview() {
+	return previewStopPromise ??= (async () => {
+		previewStopping = true;
+		if (serverProcess && ownedServerUrl && desktopAPISecret) {
+			try {
+				const response = await fetch(`${ownedServerUrl}/api/storage/shutdown`, {
+					method: "POST",
+					headers: { "x-learnharness-desktop": desktopAPISecret },
+					signal: AbortSignal.timeout(15_000),
+				});
+				if (!response.ok || (await response.json()).stopped !== true) log(`preview shutdown did not finish draining (HTTP ${response.status})`);
+			} catch { log("preview shutdown could not finish draining before the deadline"); }
 		}
-	}, 3000);
+		await killServer();
+		await anyRuntime?.stop();
+		previewStopped = true;
+	})();
+}
+
+function previewFailed(message) {
+	if (previewFailureShown || previewStopping) return;
+	previewFailureShown = true;
+	// Stop calls immediately; a later app launch may reopen saved data but never replays this turn.
+	killServer();
+	const translated = app.getLocale?.().startsWith("zh")
+		? "本机数据服务已停止。请重新启动 LearnHarness Any Preview，已保存的数据会保留。"
+		: message;
+	dialog.showErrorBox(PRODUCT_NAME, translated);
+	app.quit();
+}
+
+async function waitForPreviewStorage(url) {
+	const deadline = Date.now() + 60_000;
+	while (Date.now() < deadline) {
+		if (previewStopping || !serverProcess) throw new Error("The application service stopped during database initialization.");
+		try {
+			const response = await fetch(`${url}/api/storage/ready`, { headers: { "x-learnharness-desktop": desktopAPISecret }, signal: AbortSignal.timeout(5000) });
+			if (response.ok && (await response.json()).ready === true) return;
+			if (response.status !== 503) throw new Error(`Database initialization failed (${response.status}).`);
+		} catch (error) {
+			if (error.message.startsWith("Database initialization failed")) throw error;
+		}
+		await new Promise((resolve) => setTimeout(resolve, 200));
+	}
+	throw new Error("The local workspace did not finish initializing. Restart LearnHarness Any Preview.");
 }
 
 /** Security posture (all defaults asserted explicitly; the guards are the
@@ -504,6 +576,11 @@ function installUpdateNow() {
 }
 
 function setupAutoUpdater() {
+	if (ANY_PREVIEW) {
+		log("auto-update: Any Preview — updater disabled");
+		reportUpdateStatus("disabled");
+		return;
+	}
 	if (!app.isPackaged) {
 		log("auto-update: dev build — updater disabled");
 		reportUpdateStatus("disabled");
@@ -640,7 +717,12 @@ async function main() {
 	});
 
 	// The child must not outlive us — cover every quit path.
-	app.on("before-quit", killServer);
+	app.on("before-quit", (event) => {
+		if (!ANY_PREVIEW) { killServer(); return; }
+		if (previewStopped) return;
+		event.preventDefault();
+		if (!previewStopping) void stopPreview().finally(() => app.quit());
+	});
 	process.on("exit", killServer);
 	process.on("SIGHUP", killServer);
 
@@ -650,8 +732,14 @@ async function main() {
 	// spawn, no packaging, full HMR. The rest of this shell still applies
 	// (guards, menu, single instance).
 	const devUrl = process.env.LH_DEV_URL;
+	if (ANY_PREVIEW && devUrl) throw new Error("Any Preview must own its application server. Use npm run desktop:any:dev.");
 	const url = devUrl ?? `http://127.0.0.1:${await freePort()}`;
 	if (!devUrl) {
+		if (ANY_PREVIEW) {
+			const binary = path.join(app.isPackaged ? path.join(process.resourcesPath, "any") : path.resolve(__dirname, `../vendor/any/${process.platform}-${process.arch}`), process.platform === "win32" ? "any.exe" : "any");
+			anyRuntime = await startAnySupervisor({ binary, dataDir: path.join(app.getPath("userData"), "any"), onFailure: previewFailed });
+			if (previewStopping) { await anyRuntime.stop(); throw new Error("Preview startup was cancelled."); }
+		}
 		desktopAPISecret = randomBytes(32).toString("hex");
 		const ownedOrigin = new URL(url).origin;
 		// All URLs, not only /api: remove the header again on external redirects.
@@ -678,8 +766,10 @@ async function main() {
 		await subscriptions.ready;
 		log(`starting server: ${serverEntry()}`);
 		log(`data dir: ${DATA_DIR()}${fs.existsSync(AUTH_FILE()) ? " · auth.json: present" : " · auth.json: ABSENT (no BYOK keys yet)"}`);
+		if (ANY_PREVIEW) ownedServerUrl = url;
 		await startServer(new URL(url).port);
 		await waitUntilUp(url);
+		if (ANY_PREVIEW) await waitForPreviewStorage(url);
 		log(`server up: ${url}`);
 	} else {
 		log(`dev mode: ${devUrl}`);

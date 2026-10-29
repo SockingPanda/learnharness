@@ -1,0 +1,12 @@
+{
+  "version": "0.3.5",
+  "commit": "e7ea90eab16952b61c3513b0464708812c86d655",
+  "networkId": "N9DU6hLkTAbvcpji3TCKPPd3UQWKGyzUxGmgJEyvhByqAjfD",
+  "releaseUrl": "https://github.com/anyproto/any/releases/tag/v0.3.5",
+  "assets": {
+    "darwin-arm64": { "file": "any-v0.3.5-darwin-arm64.tar.gz", "sha256": "67717ae2c08a8f4fdf1153d029a4c5a3938eed40ae0abb1e6127161d63c063b9" },
+    "darwin-x64": { "file": "any-v0.3.5-darwin-x86_64.tar.gz", "sha256": "69d775225b4d159c6029223eb89c84cba7dcc1bd2a94d288244cdfa8d26b580a" },
+    "linux-x64": { "file": "any-v0.3.5-linux-x86_64.tar.gz", "sha256": "6dc66bf38bc8c985186a3f3df4ee8ca1e092dde11386eeba9f473e7b9b9c13f5" },
+    "win32-x64": { "file": "any-v0.3.5-windows-x86_64.tar.gz", "sha256": "c4486478dafedf5def96fc52401d1cbfb968297f381691526ae08f2f2d5832e2" }
+  }
+}
