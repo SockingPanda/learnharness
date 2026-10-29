@@ -1,3 +1,4 @@
+import { storageMutationResponse } from "@/src/server";
 import {
 	clampChatLevel,
 	effectiveSettings,
@@ -25,8 +26,10 @@ import type { ChatSettings } from "@/src/core";
  * (src/server/settings-body.ts, default-settings wave 2026-09-18).
  */
 export async function PUT(req: Request, { params }: { params: Promise<{ id: string }> }) {
+	const stopping = storageMutationResponse();
+	if (stopping) return stopping;
 	const { id } = await params;
-	if (!getChat(id)) return Response.json({ error: "Not found" }, { status: 404 });
+	if (!await getChat(id)) return Response.json({ error: "Not found" }, { status: 404 });
 
 	const body = await req.json().catch(() => null);
 	const parsed = parseSettingsBody(body);
@@ -43,6 +46,6 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
 	// level never rejects — it clamps to the named model's nearest
 	// supported (body model, else the record's strong slot).
 	const settings = clampChatLevel(parsed.settings, effectiveSettings().models.strong);
-	stores.chatStore.saveSettings(id, settings);
+	await stores.chatStore.saveSettings(id, settings);
 	return Response.json({ settings });
 }

@@ -35,7 +35,7 @@ export async function POST(req: Request) {
 	}
 
 	if (kind === "job") {
-		const outcome = abortJob(id);
+		const outcome = await abortJob(id);
 		if (!outcome.ok) {
 			const status = outcome.reason === "not_found" ? 404 : 409;
 			return Response.json({ ok: false, reason: outcome.reason }, { status });

@@ -1,7 +1,7 @@
 import { notFound } from "next/navigation";
 import { Chat } from "@/components/chat";
 import { slotsConfigured } from "@/src/core";
-import { compactionInFlight, getChat, isTurnRunning, readSettingsRecord, turnFailure } from "@/src/server";
+import { compactionInFlight, getChat, isTurnRunning, readSettingsRecord, sessionTurnFailure } from "@/src/server";
 
 export const dynamic = "force-dynamic";
 
@@ -13,7 +13,7 @@ export default async function ChatPage({
 	searchParams: Promise<{ prompt?: string }>;
 }) {
 	const [{ id }, { prompt }] = await Promise.all([params, searchParams]);
-	const chat = getChat(id);
+	const chat = await getChat(id);
 	if (!chat) notFound();
 	// The persistent setup CTA's seed (BYOK, owner 2026-09-22): slotsConfigured
 	// over the settings record, server-read — the same gate home/new read. The
@@ -29,7 +29,8 @@ export default async function ChatPage({
 				// derived app-side (core/view.ts projectView; GET serves the same
 				// native messages).
 				initialMessages={chat.messages}
-			initialError={turnFailure(chat.id)}
+			initialError={sessionTurnFailure(chat)}
+			initialPendingTurnId={chat.pendingTurnId}
 			initialConfigured={slotsConfigured(record?.models)}
 			initialPrompt={prompt}
 			// A teacher turn that outlived its client: the remounted view must

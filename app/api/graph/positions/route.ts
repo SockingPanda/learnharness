@@ -1,3 +1,4 @@
+import { storageMutationResponse } from "@/src/server";
 /**
  * PUT /api/graph/positions — the live-physics drag commit. The client
  * anneals a drag to rest and sends the new positions; the server
@@ -14,11 +15,13 @@ import { commitPositions } from "@/src/server";
 export const dynamic = "force-dynamic";
 
 export async function PUT(request: Request) {
+	const stopping = storageMutationResponse();
+	if (stopping) return stopping;
 	let body: unknown;
 	try {
 		body = await request.json();
 	} catch {
 		return Response.json({ error: "invalid JSON body" }, { status: 400 });
 	}
-	return Response.json({ positions: commitPositions(body) });
+	return Response.json({ positions: await commitPositions(body) });
 }

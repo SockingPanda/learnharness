@@ -1,3 +1,4 @@
+import { storageMutationResponse } from "@/src/server";
 /**
  * POST /api/graph/coverage/extract — the manual extraction affordance
  * (vision-extraction-coverage.md): run the pipeline over ONE session's
@@ -15,6 +16,8 @@ import { extraction, extractionStatuses } from "@/src/server";
 export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
+	const stopping = storageMutationResponse();
+	if (stopping) return stopping;
 	let body: unknown;
 	try {
 		body = await request.json();

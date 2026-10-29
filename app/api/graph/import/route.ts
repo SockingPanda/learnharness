@@ -1,3 +1,4 @@
+import { storageMutationResponse } from "@/src/server";
 /**
  * POST /api/graph/import — the format-agnostic front door's transport
  * (vision §1, 2026-09-13): raw personal-notes files in, one extraction run
@@ -41,6 +42,8 @@ interface ImportResult {
 }
 
 export async function POST(request: Request) {
+	const stopping = storageMutationResponse();
+	if (stopping) return stopping;
 	const form = await request.formData();
 	const files = form.getAll("files").filter((f): f is File => f instanceof File);
 	if (files.length === 0) {

@@ -36,8 +36,8 @@ function connectionModel(provider: string, id: string): Model<Api> | undefined {
 	return provider === "chatgpt" ? chatGPTModel(id) : nativeSubscriptionId(provider) ? nativeSubscriptionModel(provider, id) : piModels().getModel(provider, id);
 }
 function connectionProviderIds(): string[] { return [...piModels().getProviders().map((p) => p.id), "chatgpt", ...NATIVE_SUBSCRIPTIONS.map((p) => p.logicalId)]; }
-import { settingsStore } from "../store/settings.ts";
-import { effectiveSettings } from "./stores.ts";
+import { effectiveSettings, stores } from "./stores.ts";
+const { settingsStore } = stores;
 import { keyValue } from "./keys.ts";
 import type { ChatSettings } from "../core/contracts/chat.ts";
 import type {

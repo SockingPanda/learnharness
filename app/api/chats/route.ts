@@ -1,3 +1,4 @@
+import { storageMutationResponse } from "@/src/server";
 import { chainsForSelection, formatChainLine } from "@/src/core";
 import { newGraphContextMessage, type GraphContextPick } from "@/src/core";
 import { compactionInFlight, createChat, isTurnRunning, listChats, readSettingsRecord, stores, titleFromPrompt } from "@/src/server";
@@ -11,7 +12,7 @@ import type { ChatListItem } from "@/src/core";
  *  (a running spinner per row would double-signal them), so busy means
  *  exactly "a teach turn is in flight". */
 export async function GET() {
-	const chats: ChatListItem[] = listChats().map((c) => ({
+	const chats: ChatListItem[] = (await listChats()).map((c) => ({
 		...c,
 		busy: isTurnRunning(c.id),
 		compacting: compactionInFlight(c.id),
@@ -20,12 +21,14 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
+	const stopping = storageMutationResponse();
+	if (stopping) return stopping;
 	const body = (await req.json().catch(() => ({}))) as { title?: unknown; kind?: unknown; graphContext?: unknown };
 	const title = typeof body.title === "string" ? body.title : "";
 	// Practice sessions (owner, 2026-10-04): kind "practice" marks the
 	// record — the practice agent + its tools from turn 1, no extraction.
 	const kind = body.kind === "practice" || body.kind === "reading" ? body.kind : undefined;
-	const chat = createChat(titleFromPrompt(title || "Untitled session"), kind);
+	const chat = await createChat(titleFromPrompt(title || "Untitled session"), kind);
 	// PER-SESSION MODELS (owner, 2026-09-28): a session owns its model +
 	// thinking level from birth — stamped verbatim from the STRONG slot,
 	// the new-session default. From here the strong slot never reaches
@@ -35,7 +38,7 @@ export async function POST(req: Request) {
 	// refuses honestly until the setup flow fills the slot.
 	const strong = readSettingsRecord()?.models?.strong;
 	if (strong?.model) {
-		stores.chatStore.saveSettings(chat.id, {
+		await stores.chatStore.saveSettings(chat.id, {
 			model: { provider: strong.model.provider, id: strong.model.id },
 			thinkingLevel: strong.thinkingLevel,
 		});
@@ -60,12 +63,13 @@ export async function POST(req: Request) {
 					.slice(0, 64)
 			: [];
 	if (picks.length > 0) {
-		const byId = new Map(stores.graphStore.readNodes().map((n) => [n.id, n]));
+		const graph = await stores.graphStore.readSnapshot();
+		const byId = new Map(graph.nodes.map((n) => [n.id, n]));
 		const pickedNodes = picks.map((p) => byId.get(p.id)).filter((n) => n !== undefined);
-		const chainLines = chainsForSelection(pickedNodes, stores.graphStore.readChains()).map((c) =>
+		const chainLines = chainsForSelection(pickedNodes, graph.chains).map((c) =>
 			formatChainLine(c, Object.fromEntries(byId)),
 		);
-		stores.chatStore.saveMessages(chat.id, [newGraphContextMessage(picks, chainLines)]);
+		await stores.chatStore.appendMessages(chat.id, [newGraphContextMessage(picks, chainLines)]);
 	}
 	return Response.json({ id: chat.id, title: chat.title });
 }

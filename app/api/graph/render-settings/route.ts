@@ -1,3 +1,4 @@
+import { storageMutationResponse } from "@/src/server";
 /**
  * GET/PUT /api/graph/render-settings — server persistence for the graph
  * view's rendering controls (node/edge/arrow/label sizes, the label-zoom
@@ -21,6 +22,8 @@ export async function GET() {
 }
 
 export async function PUT(request: Request) {
+	const stopping = storageMutationResponse();
+	if (stopping) return stopping;
 	let body: unknown;
 	try {
 		body = await request.json();

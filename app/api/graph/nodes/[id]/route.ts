@@ -1,3 +1,4 @@
+import { storageMutationResponse } from "@/src/server";
 import { deleteGraphNode } from "@/src/server";
 
 /**
@@ -18,8 +19,10 @@ import { deleteGraphNode } from "@/src/server";
  * was removed plus the new graphRevision (the refetch signal).
  */
 export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+	const stopping = storageMutationResponse();
+	if (stopping) return stopping;
 	const { id } = await params;
-	const outcome = deleteGraphNode(id);
+	const outcome = await deleteGraphNode(id);
 	if (!outcome.ok) {
 		return Response.json({ error: outcome.error, code: outcome.code }, { status: outcome.status });
 	}

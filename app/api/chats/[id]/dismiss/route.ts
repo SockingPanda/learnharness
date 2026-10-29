@@ -1,3 +1,4 @@
+import { storageMutationResponse } from "@/src/server";
 /**
  * THE SILENT DISMISSAL ROUTE (owner design 2026-10-03, "A2"): ESC-abort
  * from a pending question writes the dismissed toolResult to the record
@@ -20,12 +21,13 @@
  * fires both).
  */
 import { ChatInputError, dismissAppends, emit, parseDismissInput } from "@/src/core";
-import { getChat, isTurnRunning, parkDismissal, stores } from "@/src/server";
+import { getChat, isTurnRunning, parkDismissal, stores, withChatWrite } from "@/src/server";
 
 export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }): Promise<Response> {
+	const stopping = storageMutationResponse();
+	if (stopping) return stopping;
 	const { id } = await ctx.params;
-	const chat = getChat(id);
-	if (!chat) return Response.json({ error: "Unknown chat" }, { status: 404 });
+	if (!await getChat(id)) return Response.json({ error: "Unknown chat" }, { status: 404 });
 
 	let input;
 	try {
@@ -44,22 +46,25 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
 	// record if the dismissed question/problem really is pending there.
 	// The dismissing client has also aborted the turn — this 202 is the
 	// "noted, will land" contract.
-	if (isTurnRunning(id)) {
-		parkDismissal(id, input);
-		return Response.json({ ok: true, parked: true }, { status: 202 });
-	}
+	return withChatWrite(id, async () => {
+		const chat = await getChat(id);
+		if (!chat || chat.deleting) return Response.json({ error: "Unknown chat" }, { status: 404 });
+		if (isTurnRunning(id)) {
+			parkDismissal(id, input);
+			return Response.json({ ok: true, parked: true }, { status: 202 });
+		}
 
-	let appends;
-	try {
-		appends = dismissAppends(chat, input);
-	} catch (err) {
-		if (err instanceof ChatInputError) return Response.json({ error: err.message }, { status: 400 });
-		throw err;
-	}
+		let appends;
+		try {
+			appends = dismissAppends(chat, input);
+		} catch (err) {
+			if (err instanceof ChatInputError) return Response.json({ error: err.message }, { status: 400 });
+			throw err;
+		}
 
-	// Write-ahead, turn-less: the record is the only state that moves.
-	const merged = [...chat.messages, ...appends];
-	stores.chatStore.saveMessages(id, merged);
-	emit("record-changed", { chatId: id });
-	return Response.json({ ok: true });
+		// Write-ahead, turn-less: the record is the only state that moves.
+		await stores.chatStore.appendMessages(id, appends);
+		emit("record-changed", { chatId: id });
+		return Response.json({ ok: true });
+	});
 }

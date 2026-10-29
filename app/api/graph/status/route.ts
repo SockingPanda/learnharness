@@ -12,7 +12,7 @@ import { chatStore, extractionStatuses } from "@/src/server";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-	const runs = extractionStatuses().map((run) => ({
+	const runs = await Promise.all(extractionStatuses().map(async (run) => ({
 		// Unique row id (the registry job key: source id, or "src#i" for
 		// chunk jobs) — one source's rows share chatId, and React keys on
 		// it would collide. chatId stays the SOURCE id: reveal/cost
@@ -23,7 +23,7 @@ export async function GET() {
 		// runs fall back to the chat store's title. Chunk jobs append their
 		// part ("· 2/5") — one row per chunk of the fan-out.
 		title:
-			(run.label ?? chatStore.getChat(run.chatId)?.title ?? run.chatId) +
+			(run.label ?? (await chatStore.getChat(run.chatId))?.title ?? run.chatId) +
 			(run.part ? ` · ${run.part.i}/${run.part.n}` : ""),
 		phase: run.phase,
 		startedAt: run.startedAt,
@@ -31,6 +31,6 @@ export async function GET() {
 		// accumulated as steps bill. Cost and context-window folds are the
 		// consumer's (core/prices.ts helpers — nothing stores dollars).
 		usage: run.usage,
-	}));
+	})));
 	return Response.json({ runs });
 }

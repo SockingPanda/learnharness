@@ -1,3 +1,4 @@
+import { storageMutationResponse } from "@/src/server";
 /**
  * THE ARTIFACT-UI ROUTE (owner, 2026-10-07): persists the learner's invert
  * switch onto a demo/figure steer message (details.ui.inverted) so it
@@ -9,12 +10,14 @@
  * Guards: 404 unknown chat, 400 for a body that isn't
  * { input: { messageId, inverted } } or targets no demo/visual steer.
  */
-import { setSteerUiInverted, type SteerDetails } from "@/src/core";
+import { type SteerDetails } from "@/src/core";
 import { getChat, stores } from "@/src/server";
 
 export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }): Promise<Response> {
+	const stopping = storageMutationResponse();
+	if (stopping) return stopping;
 	const { id } = await ctx.params;
-	const chat = getChat(id);
+	const chat = await getChat(id);
 	if (!chat) return Response.json({ error: "Unknown chat" }, { status: 404 });
 
 	const body = (await req.json().catch(() => null)) as { input?: unknown } | null;
@@ -35,7 +38,8 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
 		return Response.json({ error: "No demo/figure steer with that message id" }, { status: 400 });
 	}
 
-	const messages = setSteerUiInverted(chat.messages, input.messageId, input.inverted);
-	stores.chatStore.saveMessages(id, messages);
+	if (!await stores.chatStore.setMessageInverted(id, input.messageId, input.inverted)) {
+		return Response.json({ error: "No demo/figure steer with that message id" }, { status: 400 });
+	}
 	return Response.json({ ok: true });
 }

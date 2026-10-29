@@ -1,8 +1,9 @@
-import { compactionInFlight, deleteChatSession, getChat, isTurnRunning, sessionCoverage, sessionCost, stores, turnFailure, type ChatDeleteMode } from "@/src/server";
+import { storageMutationResponse } from "@/src/server";
+import { compactionInFlight, deleteChatSession, getChat, isTurnRunning, sessionCoverage, sessionCost, stores, sessionTurnFailure, type ChatDeleteMode } from "@/src/server";
 
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
 	const { id } = await params;
-	const chat = getChat(id);
+	const chat = await getChat(id);
 	if (!chat) return Response.json({ error: "Not found" }, { status: 404 });
 	// turnInFlight lets a returning client re-attach to a running turn
 	// (chat-handler write-ahead + registry — see src/server/turn-liveness.ts).
@@ -20,9 +21,9 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
 		pricing: sessionCost(chat),
 		turnInFlight: isTurnRunning(id),
 		// Also reaches idle views that missed the failing turn's stream.
-		turnError: turnFailure(id),
+		turnError: sessionTurnFailure(chat),
 		compacting: compactionInFlight(id),
-		coverage: sessionCoverage(id),
+		coverage: await sessionCoverage(id),
 	});
 }
 
@@ -34,14 +35,16 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
  * rule as the settings PUT).
  */
 export async function PUT(req: Request, { params }: { params: Promise<{ id: string }> }) {
+	const stopping = storageMutationResponse();
+	if (stopping) return stopping;
 	const { id } = await params;
-	if (!getChat(id)) return Response.json({ error: "Not found" }, { status: 404 });
+	if (!await getChat(id)) return Response.json({ error: "Not found" }, { status: 404 });
 	const body = (await req.json().catch(() => null)) as { title?: unknown } | null;
 	if (typeof body?.title !== "string" || body.title.trim() === "") {
 		return Response.json({ error: "title must be a non-empty string" }, { status: 400 });
 	}
 	const title = body.title.trim();
-	const record = stores.chatStore.renameChat(id, title);
+	const record = await stores.chatStore.renameChat(id, title);
 	return Response.json({ title: record.title });
 }
 
@@ -66,6 +69,8 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
  * version stamp the UI polls to refetch clusters/layout).
  */
 export async function DELETE(req: Request, { params }: { params: Promise<{ id: string }> }) {
+	const stopping = storageMutationResponse();
+	if (stopping) return stopping;
 	const { id } = await params;
 	const mode = new URL(req.url).searchParams.get("mode");
 	if (mode !== "preserve-graph" && mode !== "delete-nodes") {
