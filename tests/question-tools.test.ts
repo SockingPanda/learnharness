@@ -46,8 +46,8 @@ after(() => {
 	}
 });
 
-function newChat(title: string): string {
-	const chat = chatStore.createChat(title);
+async function newChat(title: string): Promise<string> {
+	const chat = (await chatStore.createChat(title));
 	createdChats.push(chat.id);
 	return chat.id;
 }
@@ -91,15 +91,15 @@ const problemLines = (r?: AgentToolResult<{ tool: string; problems: string[] }>)
 
 describe("teachQuizToolFor: the dynamic plan-nodeId validation (position signal)", () => {
 	it("accepts a nodeId that matches a node of the session's tree", async () => {
-		const chatId = newChat("NodeId: valid");
-		chatStore.saveTree(chatId, {
+		const chatId = (await newChat("NodeId: valid"));
+		(await chatStore.saveTree(chatId, {
 			nodes: [
 				{ id: "arith", title: "Arithmetic" },
 				{ id: "expressions", title: "Expressions" },
 			],
 			edges: [{ from: "arith", to: "expressions" }],
 			version: 1,
-		});
+		}));
 		const res = await boundaryParse(teachQuizToolFor({ chatId, chatStore }), {
 			...validQuiz,
 			nodeId: "expressions",
@@ -108,12 +108,12 @@ describe("teachQuizToolFor: the dynamic plan-nodeId validation (position signal)
 	});
 
 	it("rejects a nodeId that matches no node — with a message listing the slugs", async () => {
-		const chatId = newChat("NodeId: typo");
-		chatStore.saveTree(chatId, {
+		const chatId = (await newChat("NodeId: typo"));
+		(await chatStore.saveTree(chatId, {
 			nodes: [{ id: "arith", title: "Arithmetic" }],
 			edges: [],
 			version: 1,
-		});
+		}));
 		const res = await boundaryParse(teachQuizToolFor({ chatId, chatStore }), {
 			...validQuiz,
 			nodeId: "arithmetic", // the typo — slug is 'arith'
@@ -125,7 +125,7 @@ describe("teachQuizToolFor: the dynamic plan-nodeId validation (position signal)
 	});
 
 	it("no tree yet: ANY nodeId is rejected — quizzes wait for plan_init", async () => {
-		const chatId = newChat("NodeId: no tree");
+		const chatId = (await newChat("NodeId: no tree"));
 		const tool = teachQuizToolFor({ chatId, chatStore });
 		const res = await boundaryParse(tool, { ...validQuiz, nodeId: "anything" });
 		assert.equal(res.success, false);
@@ -133,12 +133,12 @@ describe("teachQuizToolFor: the dynamic plan-nodeId validation (position signal)
 	});
 
 	it("missing nodeId is rejected at the boundary (owner ruling 2026-09-26: no untagged quizzes)", async () => {
-		const chatId = newChat("NodeId: required");
-		chatStore.saveTree(chatId, {
+		const chatId = (await newChat("NodeId: required"));
+		(await chatStore.saveTree(chatId, {
 			nodes: [{ id: "arith", title: "Arithmetic" }],
 			edges: [],
 			version: 1,
-		});
+		}));
 		const tool = teachQuizToolFor({ chatId, chatStore });
 		const { nodeId: _dropped, ...untagged } = validQuiz;
 		const res = await boundaryParse(tool, untagged);
@@ -154,23 +154,23 @@ describe("teachQuizToolFor: the dynamic plan-nodeId validation (position signal)
 	});
 
 	it("reads the LIVE record — a plan_init mutation mid-turn is honored immediately", async () => {
-		const chatId = newChat("NodeId: live record");
+		const chatId = (await newChat("NodeId: live record"));
 		const tool = teachQuizToolFor({ chatId, chatStore });
 
 		const before = await boundaryParse(tool, { ...validQuiz, nodeId: "fresh-node" });
 		assert.equal(before.success, false, "no tree yet → rejected");
 
-		chatStore.saveTree(chatId, {
+		(await chatStore.saveTree(chatId, {
 			nodes: [{ id: "fresh-node", title: "Just initialized" }],
 			edges: [],
 			version: 1,
-		});
+		}));
 		const after = await boundaryParse(tool, { ...validQuiz, nodeId: "fresh-node" });
 		assert.equal(after.success, true, "the same id validates once the tree exists — same turn");
 	});
 
 	it("the shared grading rules still chain FIRST (schema-valid ⇔ gradeable)", async () => {
-		const chatId = newChat("NodeId: grading rules intact");
+		const chatId = (await newChat("NodeId: grading rules intact"));
 		const res = await boundaryParse(teachQuizToolFor({ chatId, chatStore }), {
 			...validQuiz,
 			correctAnswer: "42", // matches no option — question-core's rule
@@ -197,8 +197,8 @@ describe("the prober's quiz: no nodeId field at all", () => {
 		assert.equal("nodeId" in (Value.Clean(probeQuizInputSchema, smuggled) as object), false, "the dock parse strips it");
 	});
 
-	it("the prober's tool registry carries the nodeId-less quiz, probe_done, and the learner-filesystem set", () => {
-		const chatId = newChat("Prober: registry");
+	it("the prober's tool registry carries the nodeId-less quiz, probe_done, and the learner-filesystem set", async () => {
+		const chatId = (await newChat("Prober: registry"));
 		const tools = createProberTools({ chatId, chatStore, deliver: () => {}, jobStore, spawn: () => {} });
 		// Fix wave (2026-09-20): the owner ruling adds research + pdf dispatch
 		// to the probe phase's registry (demo/visual stay teach-only).
@@ -233,8 +233,8 @@ describe("quiz tool descriptions carry the complete, phase-correct example", () 
 		assert.ok(!desc.includes("nodeId"), "probe example carries no phase metadata");
 	});
 
-	it("quiz: the required pair leads the example, with the plan-id caveat", () => {
-		const chatId = newChat("Teacher: description example");
+	it("quiz: the required pair leads the example, with the plan-id caveat", async () => {
+		const chatId = (await newChat("Teacher: description example"));
 		const desc = teachQuizToolFor({ chatId, chatStore }).description;
 		const teachExample = { type: "check", nodeId: "chain-rule", ...quizExampleBody };
 		assert.ok(desc.includes("```json\n" + JSON.stringify(teachExample, null, 2) + "\n```"));
@@ -263,8 +263,8 @@ describe("tool toggles (core/pending.ts + factories)", () => {
 		assert.deepEqual(TOGGLEABLE_TOOLS, ["research", "demo", "visual", "pdf"]);
 	});
 
-	it("createProberTools: absent record = full set; explicit false drops exactly that tool; probe_done survives everything", () => {
-		const chatId = newChat("Prober: toggles");
+	it("createProberTools: absent record = full set; explicit false drops exactly that tool; probe_done survives everything", async () => {
+		const chatId = (await newChat("Prober: toggles"));
 		const ctx = { chatId, chatStore, deliver: () => {}, jobStore, spawn: () => {} };
 		assert.deepEqual(Object.keys(createProberTools(ctx)).sort(), [
 			"ask_user_question", "find", "grep", "ls", "pdf", "probe", "probe_done", "read", "research",
@@ -286,8 +286,8 @@ describe("tool toggles (core/pending.ts + factories)", () => {
 		assert.ok(createProberTools(ctx, { probe_done: false }).probe_done, "probe_done always-on");
 	});
 
-	it("createTeacherTools: {research: false} removes exactly research; unknown keys are no-ops", () => {
-		const chatId = newChat("Teacher: toggles");
+	it("createTeacherTools: {research: false} removes exactly research; unknown keys are no-ops", async () => {
+		const chatId = (await newChat("Teacher: toggles"));
 		const ctx: TeacherToolContext = {
 			chatId,
 			chatStore,
@@ -366,15 +366,15 @@ describe("teachExplainToolFor: the explain variant validates nodeId like the qui
 	};
 
 	it("accepts a nodeId matching a tree node", async () => {
-		const chatId = newChat("Explain nodeId: valid");
-		chatStore.saveTree(chatId, {
+		const chatId = (await newChat("Explain nodeId: valid"));
+		(await chatStore.saveTree(chatId, {
 			nodes: [
 				{ id: "arith", title: "Arithmetic" },
 				{ id: "expressions", title: "Expressions" },
 			],
 			edges: [{ from: "arith", to: "expressions" }],
 			version: 1,
-		});
+		}));
 		const res = await boundaryParse(teachExplainToolFor({ chatId, chatStore }), {
 			...validExplain,
 			nodeId: "expressions",
@@ -383,8 +383,8 @@ describe("teachExplainToolFor: the explain variant validates nodeId like the qui
 	});
 
 	it("rejects an off-map nodeId with the slugs listed", async () => {
-		const chatId = newChat("Explain nodeId: typo");
-		chatStore.saveTree(chatId, { nodes: [{ id: "arith", title: "A" }], edges: [], version: 1 });
+		const chatId = (await newChat("Explain nodeId: typo"));
+		(await chatStore.saveTree(chatId, { nodes: [{ id: "arith", title: "A" }], edges: [], version: 1 }));
 		const res = await boundaryParse(teachExplainToolFor({ chatId, chatStore }), {
 			...validExplain,
 			nodeId: "arithmetic",
@@ -394,15 +394,15 @@ describe("teachExplainToolFor: the explain variant validates nodeId like the qui
 	});
 
 	it("no tree yet: rejected — checks wait for plan_init", async () => {
-		const chatId = newChat("Explain nodeId: no tree");
+		const chatId = (await newChat("Explain nodeId: no tree"));
 		const res = await boundaryParse(teachExplainToolFor({ chatId, chatStore }), validExplain);
 		assert.equal(res.success, false);
 		assert.match(problemLines(res.error).at(-1)!, /No plan map exists yet — call plan_init/);
 	});
 
 	it("an empty commitment is rejected at the boundary", async () => {
-		const chatId = newChat("Explain: empty commitment");
-		chatStore.saveTree(chatId, { nodes: [{ id: "arith", title: "A" }], edges: [], version: 1 });
+		const chatId = (await newChat("Explain: empty commitment"));
+		(await chatStore.saveTree(chatId, { nodes: [{ id: "arith", title: "A" }], edges: [], version: 1 }));
 		const res = await boundaryParse(teachExplainToolFor({ chatId, chatStore }), {
 			...validExplain,
 			correctAnswer: "   ",

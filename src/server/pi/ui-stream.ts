@@ -80,11 +80,11 @@ export interface PiTurnSpec {
 	/** Report settlement failure while the views are still open. */
 	onSettleError?: (error: unknown) => string;
 	/** Release liveness even if the normal finish seam throws. */
-	onSettleFailure?: (error: unknown, reportedErrorText?: string) => void;
+	onSettleFailure?: (error: unknown, reportedErrorText?: string) => void | Promise<void>;
 	/** The canonical end-of-turn seam: persist + usage + extraction + endTurn.
 	 *  Receives the agent's FULL final state (native messages) — the caller
 	 *  persists the slice past its own base count. */
-	onFinish: (messages: AgentMessage[], isAborted: boolean) => void;
+	onFinish: (messages: AgentMessage[], isAborted: boolean, didFail: boolean) => void | Promise<void>;
 	/** Tool-call ids already used in this chat's record (THE LACAN FIX,
 	 *  owner-approved 2026-10-04): when present, a ToolCallIdUniquifier
 	 *  sits at this boundary — providers that reset ids every response
@@ -126,6 +126,7 @@ export function runPiTurn(spec: PiTurnSpec): PiTurnHandle {
 
 	let settled = false;
 	let sawAbort = false;
+	let didFail = false;
 	let reportedErrorText: string | undefined;
 
 	// THE PER-TURN STATE LOG (memory-only — the settle-only disk writes
@@ -223,23 +224,33 @@ export function runPiTurn(spec: PiTurnSpec): PiTurnHandle {
 	// suppressing the fresh per-turn re-seed). Our app mints no system
 	// messages of its own (the prompt is composed per turn), so dropping
 	// the role wholesale is exact; revisit if prompt-updates ever land.
-	const settleWith = () => {
+	let settlement: Promise<void> | undefined;
+	const settleWith = async () => {
 		try {
 			const settled_ = [...agent.state.messages].filter((m) => (m as { role?: string }).role !== "system");
-			onFinish((uniquifier?.remapSettled(settled_) as AgentMessage[]) ?? settled_, sawAbort);
+			await onFinish((uniquifier?.remapSettled(settled_) as AgentMessage[]) ?? settled_, sawAbort, didFail);
+			return true;
 		} catch (err) {
 			console.error("[turn] settlement failed:", err);
-			try { onSettleFailure?.(err, reportedErrorText); }
+			try { await onSettleFailure?.(err, reportedErrorText); }
 			catch (cleanupError) { console.error("[turn] settlement cleanup failed:", cleanupError); }
 			if (reportedErrorText === undefined) {
 				reportedErrorText = onSettleError?.(err) ?? "An error occurred.";
 				send({ type: "error", errorText: reportedErrorText });
 			}
+			return false;
 		}
 	};
 
 	const handle = (event: AgentEvent) => {
-		if (settled) return;
+		if (settled || settlement) return;
+		if (event.type === "agent_end") {
+			settlement = (async () => {
+				if (await settleWith()) send(uniquifier ? uniquifier.event(event) : event);
+				closeAll();
+			})();
+			return;
+		}
 		// THE LACAN FIX: ids uniquify HERE, before any view — the one seam
 		// every consumer downstream shares. No uniquifier → verbatim.
 		const uniqued = uniquifier ? uniquifier.event(event) : event;
@@ -253,11 +264,7 @@ export function runPiTurn(spec: PiTurnSpec): PiTurnHandle {
 		if (event.type === "message_end") {
 			const m = event.message as { role?: string; stopReason?: string } | undefined;
 			if (m?.role === "assistant" && m.stopReason === "aborted") sawAbort = true;
-		}
-		if (event.type === "agent_end") {
-			// Persist/report before the terminal closes every view to new frames.
-			settleWith();
-			closeAll();
+			if (m?.role === "assistant" && m.stopReason === "error") didFail = true;
 		}
 	};
 	requestCycle?.bindRelease(handle);
@@ -278,19 +285,23 @@ export function runPiTurn(spec: PiTurnSpec): PiTurnHandle {
 					break;
 				}
 			} while (!sawAbort);
+			await settlement;
 		} catch (err) {
 			// A loop-level failure (not a provider error — those ride the
 			// stream as stopReason "error"): surface, close, persist. If the
 			// agent already settled (agent_end reached before the throw),
 			// the seam has run — never settle twice.
-			if (settled) {
+			if (settled || settlement) {
+				await settlement;
 				console.error("[turn] error after settlement:", err);
 				return;
 			}
+			didFail = true;
 			console.error("[turn] agent loop failed:", err);
 			reportedErrorText = onError?.(err) ?? "An error occurred.";
 			send({ type: "error", errorText: reportedErrorText });
-			settleWith();
+			settlement = settleWith().then(() => undefined);
+			await settlement;
 			closeAll();
 		}
 	})();

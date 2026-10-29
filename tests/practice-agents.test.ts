@@ -67,7 +67,7 @@ function activeProblemRecord(): LhMessage[] {
 function recordStore(messages: LhMessage[]) {
 	return {
 		store: {
-			getChat: (_id: string) => ({ messages, kind: "practice" }),
+			getChat: async (_id: string) => ({ messages, kind: "practice" }),
 		},
 	};
 }

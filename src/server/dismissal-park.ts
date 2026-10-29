@@ -64,14 +64,14 @@ export function takeParkedDismissal(chatId: string): ParkedDismissal | null {
  *  ChatInputError means the dismissed thing never materialized — the park
  *  is dropped, silence is the correct outcome. Emits "record-changed"
  *  exactly when something was written. */
-export function applyParkedDismissal(chatStore: ChatStore, chatId: string): void {
+export async function applyParkedDismissal(chatStore: ChatStore, chatId: string): Promise<void> {
 	const input = takeParkedDismissal(chatId);
 	if (input === null) return;
-	const record = chatStore.getChat(chatId);
-	if (!record) return;
+	const record = await chatStore.getChat(chatId);
+	if (!record || record.deleting) return;
 	try {
 		const appends = dismissAppends(record, input as Parameters<typeof dismissAppends>[1]);
-		chatStore.saveMessages(chatId, [...record.messages, ...appends]);
+		await chatStore.appendMessages(chatId, appends);
 		emit("record-changed", { chatId });
 	} catch (err) {
 		if (err instanceof ChatInputError) return; // never materialized — drop

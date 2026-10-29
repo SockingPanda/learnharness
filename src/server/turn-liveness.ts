@@ -21,6 +21,7 @@
  */
 
 import { emit } from "../core/events.ts";
+import { isStorageStopping } from "../core/storage-lifecycle.ts";
 import { clearTurnFailure } from "./turn-runs.ts";
 
 interface LhGlobal {
@@ -43,7 +44,7 @@ const MAX_TURN_MS = 30 * 60_000;
  * double-begin (the 409 path) stays silent — no turn began.
  */
 export function beginTurn(chatId: string): boolean {
-	if (isTurnRunning(chatId)) return false;
+	if (isStorageStopping() || isTurnRunning(chatId)) return false;
 	clearTurnFailure(chatId);
 	inFlight.set(chatId, Date.now());
 	emit("turn-started", { chatId });
@@ -60,6 +61,9 @@ export function beginTurn(chatId: string): boolean {
 export function endTurn(chatId: string): void {
 	if (inFlight.delete(chatId)) emit("turn-settled", { chatId });
 }
+
+/** Includes setup and final persistence, without TTL eviction during shutdown. */
+export function activeTurnIds(): string[] { return [...inFlight.keys()]; }
 
 /** True while the chat's turn is in flight; lazily evicts stale entries.
  * The eviction path is DELIBERATELY event-free: it is a leak guard for a

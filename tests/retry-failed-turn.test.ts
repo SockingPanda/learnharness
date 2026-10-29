@@ -93,10 +93,10 @@ async function turn(engine: PiEngine, chatId: string, input: unknown, buildAgent
 	return ack;
 }
 
-function createConfiguredChat(title: string, kind?: "practice") {
-	const chat = chatStore.createChat(title, kind);
-	chatStore.saveSettings(chat.id, { model: { provider: "openrouter", id: "z-ai/glm-5.3-flash" } });
-	chatStore.saveTree(chat.id, { nodes: [{ id: "planet-order", title: "Planet order" }], edges: [], version: 1 });
+async function createConfiguredChat(title: string, kind?: "practice") {
+	const chat = (await chatStore.createChat(title, kind));
+	(await chatStore.saveSettings(chat.id, { model: { provider: "openrouter", id: "z-ai/glm-5.3-flash" } }));
+	(await chatStore.saveTree(chat.id, { nodes: [{ id: "planet-order", title: "Planet order" }], edges: [], version: 1 }));
 	return chat;
 }
 
@@ -115,7 +115,7 @@ function gradedAnswer() {
 	return buildAnswer(qd, { values: ["Mercury"], thinking: "Mercury is the innermost", readingThinking: "I followed the planet ordering", confidence: 80 });
 }
 
-const roles = (chatId: string) => chatStore.getChat(chatId)!.messages.map((m) => m.role);
+const roles = async (chatId: string) => (await chatStore.getChat(chatId))!.messages.map((m) => m.role);
 const failed = (id: string, text = ""): LhMessage => ({
 	...fauxAssistantMessage(text, { stopReason: "error", errorMessage: "fetch failed" }), id,
 });
@@ -134,20 +134,20 @@ describe("failed-response Retry (issue #110)", () => {
 			networkFailure,
 			() => fauxAssistantMessage([fauxText("Right — Mercury it is.")]),
 		]);
-		const chat = createConfiguredChat("Test: retry after failed answer");
+		const chat = (await createConfiguredChat("Test: retry after failed answer"));
 		const answer = gradedAnswer();
 
 		await turn(engine, chat.id, { type: "text", text: "teach me the planets" });
 		await turn(engine, chat.id, { type: "answer", toolCallId: "call-1", answer });
-		const before = chatStore.getChat(chat.id)!.messages;
-		assert.deepEqual(roles(chat.id), ["user", "assistant", "toolResult", "assistant"]);
+		const before = (await chatStore.getChat(chat.id))!.messages;
+		assert.deepEqual((await roles(chat.id)), ["user", "assistant", "toolResult", "assistant"]);
 		assert.ok(endsInFailedTurn(before));
 		assert.equal((await turn(engine, chat.id, { type: "answer", toolCallId: "call-1", answer })).status, 400);
 		assert.equal((await turn(engine, chat.id, { type: "retry" })).status, 200);
 
-		const saved = chatStore.getChat(chat.id)!.messages;
+		const saved = (await chatStore.getChat(chat.id))!.messages;
 		assertPreserved(before, saved);
-		assert.deepEqual(roles(chat.id), ["user", "assistant", "toolResult", "assistant", "assistant"]);
+		assert.deepEqual((await roles(chat.id)), ["user", "assistant", "toolResult", "assistant", "assistant"]);
 		assert.equal(endsInFailedTurn(saved), false, "a new successful response supersedes the retained failure");
 		const results = saved.filter((m) => m.role === "toolResult" && m.toolCallId === "call-1");
 		assert.equal(results.length, 1, "the learner's answer was not submitted twice");
@@ -161,24 +161,24 @@ describe("failed-response Retry (issue #110)", () => {
 
 	it("a failed text turn retries without adding another learner message", async () => {
 		const { engine, contexts } = scripted([networkFailure, () => fauxAssistantMessage("Hello again.")]);
-		const chat = createConfiguredChat("Test: retry after failed text");
+		const chat = (await createConfiguredChat("Test: retry after failed text"));
 		await turn(engine, chat.id, { type: "text", text: "hello" });
-		const before = chatStore.getChat(chat.id)!.messages;
+		const before = (await chatStore.getChat(chat.id))!.messages;
 		assert.ok(endsInFailedTurn(before));
 		assert.equal((await turn(engine, chat.id, { type: "retry" })).status, 200);
-		const saved = chatStore.getChat(chat.id)!.messages;
+		const saved = (await chatStore.getChat(chat.id))!.messages;
 		assertPreserved(before, saved);
-		assert.deepEqual(roles(chat.id), ["user", "assistant", "assistant"]);
+		assert.deepEqual((await roles(chat.id)), ["user", "assistant", "assistant"]);
 		assert.deepEqual(contexts.at(-1), ["user"]);
 		assert.match(JSON.stringify(saved.at(-1)), /Hello again/);
 	});
 
 	it("preserves partial text and its usage reference before the replacement succeeds", { timeout: 5_000 }, async () => {
-		const chat = createConfiguredChat("Test: retained partial reply");
+		const chat = (await createConfiguredChat("Test: retained partial reply"));
 		const before = [newUserMessage("hello"), failed("partial", "A partial explanation already shown.")];
-		chatStore.saveMessages(chat.id, before);
+		(await chatStore.saveMessages(chat.id, before));
 		const usage = { id: "original-turn", messageId: "partial", at: "2026-01-01T00:00:00Z", model: "faux:fixture", steps: [] };
-		chatStore.appendTurnUsage(chat.id, usage);
+		(await chatStore.appendTurnUsage(chat.id, usage));
 		let release!: () => void;
 		let started!: () => void;
 		const waiting = new Promise<void>((resolve) => { release = resolve; });
@@ -191,14 +191,14 @@ describe("failed-response Retry (issue #110)", () => {
 		const retry = turn(engine, chat.id, { type: "retry" });
 		await entered;
 		try {
-			assert.deepEqual(chatStore.getChat(chat.id)!.messages, before, "write-ahead must not delete the failed attempt");
-			assert.deepEqual(chatStore.getChat(chat.id)!.turns, [usage]);
+			assert.deepEqual((await chatStore.getChat(chat.id))!.messages, before, "write-ahead must not delete the failed attempt");
+			assert.deepEqual((await chatStore.getChat(chat.id))!.turns, [usage]);
 			assert.doesNotMatch(histories.at(-1)!, /partial explanation/);
 		} finally {
 			release();
 			await retry;
 		}
-		const saved = chatStore.getChat(chat.id)!;
+		const saved = (await chatStore.getChat(chat.id))!;
 		assertPreserved(before, saved.messages);
 		assert.ok(saved.turns?.some((entry) => entry.id === usage.id && entry.messageId === "partial"));
 		assert.equal(saved.messages.length, before.length + 1, "the persistence offset counts the temporary prefix, not the full saved record");
@@ -206,16 +206,16 @@ describe("failed-response Retry (issue #110)", () => {
 
 	it("keeps every failed attempt across repeated retries, then appends success once", async () => {
 		const { engine, contexts } = scripted([networkFailure, networkFailure, () => fauxAssistantMessage("Recovered.")]);
-		const chat = createConfiguredChat("Test: repeated model failure");
+		const chat = (await createConfiguredChat("Test: repeated model failure"));
 		await turn(engine, chat.id, { type: "text", text: "hello" });
-		const first = chatStore.getChat(chat.id)!.messages;
+		const first = (await chatStore.getChat(chat.id))!.messages;
 		await turn(engine, chat.id, { type: "retry" });
-		const second = chatStore.getChat(chat.id)!.messages;
+		const second = (await chatStore.getChat(chat.id))!.messages;
 		assertPreserved(first, second);
 		assert.equal(second.length, first.length + 1);
 		assert.ok(endsInFailedTurn(second));
 		await turn(engine, chat.id, { type: "retry" });
-		const saved = chatStore.getChat(chat.id)!.messages;
+		const saved = (await chatStore.getChat(chat.id))!.messages;
 		assertPreserved(second, saved);
 		assert.equal(saved.length, second.length + 1);
 		assert.deepEqual(contexts, [["user"], ["user"], ["user"]]);
@@ -224,15 +224,15 @@ describe("failed-response Retry (issue #110)", () => {
 
 	it("preserves a trailing plan block while retrying from the preceding input", async () => {
 		const { engine, contexts } = scripted([networkFailure, () => fauxAssistantMessage("Planned reply.")]);
-		const chat = createConfiguredChat("Test: retry past a plan block");
+		const chat = (await createConfiguredChat("Test: retry past a plan block"));
 		await turn(engine, chat.id, { type: "text", text: "hello" });
-		const before = [...chatStore.getChat(chat.id)!.messages, newPlanBlockMessage("plan-1", {})];
-		chatStore.saveMessages(chat.id, before);
+		const before = [...(await chatStore.getChat(chat.id))!.messages, newPlanBlockMessage("plan-1", {})];
+		(await chatStore.saveMessages(chat.id, before));
 		assert.ok(endsInFailedTurn(before));
 		assert.equal((await turn(engine, chat.id, { type: "retry" })).status, 200);
-		const saved = chatStore.getChat(chat.id)!.messages;
+		const saved = (await chatStore.getChat(chat.id))!.messages;
 		assertPreserved(before, saved);
-		assert.deepEqual(roles(chat.id), ["user", "assistant", "custom", "assistant"]);
+		assert.deepEqual((await roles(chat.id)), ["user", "assistant", "custom", "assistant"]);
 		assert.deepEqual(contexts.at(-1), ["user"], "the plan block remains UI-only");
 	});
 
@@ -253,14 +253,14 @@ describe("failed-response Retry (issue #110)", () => {
 			},
 		};
 		const factory: AgentFactory = (opts) => createTeacherAgent(undefined, { ...opts, engine, tools });
-		const chat = createConfiguredChat("Test: no completed tool replay");
+		const chat = (await createConfiguredChat("Test: no completed tool replay"));
 		await turn(engine, chat.id, { type: "text", text: "save a note" }, factory);
 		assert.equal(executions, 1);
-		const before = chatStore.getChat(chat.id)!.messages;
-		assert.deepEqual(roles(chat.id), ["user", "assistant", "toolResult", "assistant"]);
+		const before = (await chatStore.getChat(chat.id))!.messages;
+		assert.deepEqual((await roles(chat.id)), ["user", "assistant", "toolResult", "assistant"]);
 		assert.equal((await turn(engine, chat.id, { type: "retry" }, factory)).status, 200);
 		assert.equal(executions, 1, "Retry requests another response, not execution of stored calls");
-		assertPreserved(before, chatStore.getChat(chat.id)!.messages);
+		assertPreserved(before, (await chatStore.getChat(chat.id))!.messages);
 		assert.deepEqual(contexts.at(-1), ["user", "assistant", "toolResult"]);
 	});
 
@@ -279,13 +279,13 @@ describe("failed-response Retry (issue #110)", () => {
 				},
 			},
 		});
-		const chat = createConfiguredChat("Test: unexecuted partial tool call");
+		const chat = (await createConfiguredChat("Test: unexecuted partial tool call"));
 		await turn(engine, chat.id, { type: "text", text: "hello" }, factory);
 		assert.equal(executions, 0);
-		const before = chatStore.getChat(chat.id)!.messages;
+		const before = (await chatStore.getChat(chat.id))!.messages;
 		assert.equal((await turn(engine, chat.id, { type: "retry" }, factory)).status, 200);
 		assert.equal(executions, 0);
-		assertPreserved(before, chatStore.getChat(chat.id)!.messages);
+		assertPreserved(before, (await chatStore.getChat(chat.id))!.messages);
 		assert.deepEqual(contexts.at(-1), ["user"]);
 	});
 
@@ -297,7 +297,7 @@ describe("failed-response Retry (issue #110)", () => {
 			() => fauxAssistantMessage("Assessment ready."),
 			() => fauxAssistantMessage("Now planning the lesson."),
 		]);
-		const chat = createConfiguredChat("Test: failed probe recovery");
+		const chat = (await createConfiguredChat("Test: failed probe recovery"));
 		const delivered: SteerMessage[] = [];
 		const selections: boolean[] = [];
 		const factory: AgentFactory = (opts) => {
@@ -308,14 +308,14 @@ describe("failed-response Retry (issue #110)", () => {
 			}, { ...opts, engine });
 		};
 		await turn(engine, chat.id, { type: "text", text: "teach me planet order" }, factory);
-		const before = chatStore.getChat(chat.id)!.messages;
+		const before = (await chatStore.getChat(chat.id))!.messages;
 		assert.ok(endsInFailedTurn(before));
 		assert.equal(hasProbeDone(before), false);
 		assert.equal(phaseAt3Lh(before), "probe");
 		assert.equal(delivered.length, 0, "the stored failed call never ran");
 
 		assert.equal((await turn(engine, chat.id, { type: "retry" }, factory)).status, 200);
-		const recovered = chatStore.getChat(chat.id)!.messages;
+		const recovered = (await chatStore.getChat(chat.id))!.messages;
 		assertPreserved(before, recovered);
 		assert.deepEqual(selections, [false, false], "Retry must still build the prober");
 		assert.equal(hasProbeDone(recovered), true);
@@ -327,20 +327,20 @@ describe("failed-response Retry (issue #110)", () => {
 		assert.equal((await turn(engine, chat.id, { type: "text", text: "go on" }, factory)).status, 200);
 		assert.deepEqual(selections, [false, false, true]);
 		assert.equal(delivered.length, 1, "later turns do not replay either saved call");
-		assertPreserved(recovered, chatStore.getChat(chat.id)!.messages);
+		assertPreserved(recovered, (await chatStore.getChat(chat.id))!.messages);
 	});
 
 	for (const kind of ["prober", "teacher", "practice"] as const) {
 		it(`uses the same retained-history retry boundary for the ${kind}`, async () => {
 			const { engine, contexts } = scripted([() => fauxAssistantMessage("Recovered response.")]);
-			const chat = createConfiguredChat(`Test: ${kind} retry`, kind === "practice" ? "practice" : undefined);
+			const chat = (await createConfiguredChat(`Test: ${kind} retry`, kind === "practice" ? "practice" : undefined));
 			const before: LhMessage[] = [newUserMessage("hello")];
 			if (kind === "teacher") {
 				before.push({ ...fauxAssistantMessage([fauxToolCall("probe_done", {}, { id: "probe-1" })], { stopReason: "toolUse" }), id: "probe-response" });
 				before.push({ id: "probe-result", role: "toolResult", toolCallId: "probe-1", toolName: "probe_done", content: [], details: { ok: true }, isError: false, timestamp: 1 });
 			}
 			before.push(failed("failed-response", "Partial reply."));
-			chatStore.saveMessages(chat.id, before);
+			(await chatStore.saveMessages(chat.id, before));
 			const factory: AgentFactory = (opts) => {
 				assert.equal(opts.teaching, kind === "teacher");
 				assert.ok(opts.messages?.every((m) => m.role !== "assistant" || m.stopReason !== "error"));
@@ -349,17 +349,17 @@ describe("failed-response Retry (issue #110)", () => {
 				return createTeacherAgent(undefined, { ...opts, engine });
 			};
 			assert.equal((await turn(engine, chat.id, { type: "retry" }, factory)).status, 200);
-			assertPreserved(before, chatStore.getChat(chat.id)!.messages);
-			assert.equal(chatStore.getChat(chat.id)!.messages.length, before.length + 1);
+			assertPreserved(before, (await chatStore.getChat(chat.id))!.messages);
+			assert.equal((await chatStore.getChat(chat.id))!.messages.length, before.length + 1);
 			assert.deepEqual(contexts.at(-1), kind === "teacher" ? ["user", "assistant", "toolResult"] : ["user"]);
 		});
 	}
 
 	it("treats an explicit Retry of an automatic main-agent response as foreground", async () => {
 		const { engine } = scripted([() => fauxAssistantMessage("Explicitly requested response.")]);
-		const chat = createConfiguredChat("Test: foreground manual retry");
+		const chat = (await createConfiguredChat("Test: foreground manual retry"));
 		const before = [newUserMessage("hello"), newHandoffMessage(chat.id), failed("automatic-failure")];
-		chatStore.saveMessages(chat.id, before);
+		(await chatStore.saveMessages(chat.id, before));
 		assert.equal(reconstructRequestCause(before), "background");
 		let built = false;
 		const factory: AgentFactory = (opts) => {
@@ -369,7 +369,7 @@ describe("failed-response Retry (issue #110)", () => {
 		};
 		assert.equal((await turn(engine, chat.id, { type: "retry" }, factory)).status, 200);
 		assert.ok(built);
-		assertPreserved(before, chatStore.getChat(chat.id)!.messages);
+		assertPreserved(before, (await chatStore.getChat(chat.id))!.messages);
 	});
 });
 
@@ -431,9 +431,9 @@ describe("retained generations and Pi's native provider filtering", () => {
 
 describe("Retry refusal and revalidation", () => {
 	it("rejects an invalid Retry before provider gates, turn claims or writes", async () => {
-		const chat = chatStore.createChat("Test: retry refused before subscription refresh");
-		chatStore.saveSettings(chat.id, { model: { provider: "chatgpt", id: "not-a-fixture-model" } });
-		const before = chatStore.getChat(chat.id)!;
+		const chat = (await chatStore.createChat("Test: retry refused before subscription refresh"));
+		(await chatStore.saveSettings(chat.id, { model: { provider: "chatgpt", id: "not-a-fixture-model" } }));
+		const before = (await chatStore.getChat(chat.id))!;
 		rememberTurnFailure(chat.id, "Existing settlement notice");
 		const events: string[] = [];
 		const unsubscribe = subscribe((event) => { if ("chatId" in event && event.chatId === chat.id) events.push(event.type); });
@@ -441,7 +441,7 @@ describe("Retry refusal and revalidation", () => {
 			const res = await handleChatRequest(post(chat.id, { type: "retry" }), () => { throw new Error("must not construct an agent"); });
 			assert.equal(res.status, 400, "invalid retry wins even with an unavailable subscription model");
 			assert.match(await res.text(), /requires a failed turn/);
-			assert.deepEqual(chatStore.getChat(chat.id), before);
+			assert.deepEqual((await chatStore.getChat(chat.id)), before);
 			assert.equal(turnFailure(chat.id), "Existing settlement notice", "beginTurn did not clear recovery state");
 			assert.equal(isTurnRunning(chat.id), false);
 			assert.deepEqual(events, []);
@@ -453,17 +453,17 @@ describe("Retry refusal and revalidation", () => {
 
 	it("rejects Retry after later compaction without removing the error or its boundary", async () => {
 		const { engine, contexts } = scripted([]);
-		const chat = createConfiguredChat("Test: compacted failure");
+		const chat = (await createConfiguredChat("Test: compacted failure"));
 		const failure = failed("partial", "Partial explanation.");
 		const marker = compaction(failure.id);
 		const before = [newUserMessage("hello"), failure, marker];
-		chatStore.saveMessages(chat.id, before);
-		const snapshot = chatStore.getChat(chat.id)!;
+		(await chatStore.saveMessages(chat.id, before));
+		const snapshot = (await chatStore.getChat(chat.id))!;
 		const res = await turn(engine, chat.id, { type: "retry" });
 		assert.equal(res.status, 400);
 		const body = await res.json() as { error: string };
 		assert.equal(body.error, "fetch failed\n\nThis response cannot be retried after compaction. Send a new message to continue.");
-		assert.deepEqual(chatStore.getChat(chat.id), snapshot);
+		assert.deepEqual((await chatStore.getChat(chat.id)), snapshot);
 		assert.equal(contexts.length, 0);
 		assert.equal(new SessionModel({ chatId: chat.id, initialMessages: before }).getState().error?.message, "fetch failed");
 		assert.equal(endsInFailedTurn(before), false);
@@ -472,16 +472,16 @@ describe("Retry refusal and revalidation", () => {
 	for (const later of ["compaction", "learner-input"] as const) {
 		it(`revalidates against ${later} landing on the post-compaction reread`, async () => {
 			const { engine, contexts } = scripted([]);
-			const chat = createConfiguredChat(`Test: retry race with ${later}`);
+			const chat = (await createConfiguredChat(`Test: retry race with ${later}`));
 			const before = [newUserMessage("hello"), failed("failed-response")];
-			chatStore.saveMessages(chat.id, before);
+			(await chatStore.saveMessages(chat.id, before));
 			const appended = later === "compaction" ? compaction("failed-response") : newUserMessage("A newer input");
 			const read = chatStore.getChat;
 			let reads = 0;
 			// Simulate another writer landing during the awaited gate. Do not
 			// change or invoke the compaction implementation to exercise Retry.
-			const reader = mock.method(chatStore, "getChat", (id: string) => {
-				if (id === chat.id && ++reads === 2) chatStore.saveMessages(id, [...before, appended]);
+			const reader = mock.method(chatStore, "getChat", async (id: string) => {
+				if (id === chat.id && ++reads === 2) (await chatStore.saveMessages(id, [...before, appended]));
 				return read(id);
 			});
 			const events: string[] = [];
@@ -490,7 +490,7 @@ describe("Retry refusal and revalidation", () => {
 				const res = await turn(engine, chat.id, { type: "retry" });
 				assert.equal(res.status, 400);
 				if (later === "compaction") assert.match(await res.text(), /fetch failed.*cannot be retried after compaction/);
-				assert.deepEqual(read(chat.id)!.messages, [...before, appended]);
+				assert.deepEqual((await read(chat.id))!.messages, [...before, appended]);
 				assert.equal(contexts.length, 0);
 				assert.equal(isTurnRunning(chat.id), false);
 				assert.deepEqual(events, [], "no turn was claimed after final validation refused");
@@ -503,12 +503,12 @@ describe("Retry refusal and revalidation", () => {
 
 	it("a sibling's successful retry makes a later stale Retry refuse without changing history", async () => {
 		const { engine, contexts } = scripted([networkFailure, () => fauxAssistantMessage("Recovered.")]);
-		const chat = createConfiguredChat("Test: stale sibling Retry");
+		const chat = (await createConfiguredChat("Test: stale sibling Retry"));
 		await turn(engine, chat.id, { type: "text", text: "hello" });
 		await turn(engine, chat.id, { type: "retry" });
-		const before = chatStore.getChat(chat.id)!;
+		const before = (await chatStore.getChat(chat.id))!;
 		assert.equal((await turn(engine, chat.id, { type: "retry" })).status, 400);
-		assert.deepEqual(chatStore.getChat(chat.id), before);
+		assert.deepEqual((await chatStore.getChat(chat.id)), before);
 		assert.equal(contexts.length, 2);
 	});
 });

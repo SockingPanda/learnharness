@@ -104,15 +104,15 @@ async function exec(tools: ReturnType<typeof planTools>, name: string, input: un
 	return t.execute("test", input).then((r) => r.details as PlanToolResult);
 }
 
-function newChat(title: string): string {
-	const chat = chatStore.createChat(title);
+async function newChat(title: string): Promise<string> {
+	const chat = (await chatStore.createChat(title));
 	createdChats.push(chat.id);
 	return chat.id;
 }
 
 describe("plan_init — the author-once mermaid tool (execute against the real store)", () => {
 	it("parses a mermaid block, builds the tree, persists, returns the full tree", async () => {
-		const chatId = newChat("Plan: init");
+		const chatId = (await newChat("Plan: init"));
 		const tools = planTools({ chatId, chatStore });
 
 		const res = await exec(tools, "plan_init", {
@@ -131,13 +131,13 @@ describe("plan_init — the author-once mermaid tool (execute against the real s
 			{ from: "operators", to: "expressions" },
 		]);
 
-		const saved = chatStore.getChat(chatId)!.tree;
+		const saved = (await chatStore.getChat(chatId))!.tree;
 		assert.ok(saved, "tree persisted to the chat record");
 		assert.deepEqual(saved, tree);
 	});
 
 	it("RE-CALLABLE: a rewrite replaces the tree wholesale (the mutation tools are gone)", async () => {
-		const chatId = newChat("Plan: rewrite");
+		const chatId = (await newChat("Plan: rewrite"));
 		const tools = planTools({ chatId, chatStore });
 		await exec(tools, "plan_init", {
 			mermaid: "graph TD\n  a[First attempt] --> b[Early shape]\n",
@@ -152,14 +152,14 @@ describe("plan_init — the author-once mermaid tool (execute against the real s
 			["truth", "goal"],
 		);
 		assert.deepEqual(
-			chatStore.getChat(chatId)!.tree!.nodes.map((n) => n.id),
+			(await chatStore.getChat(chatId))!.tree!.nodes.map((n) => n.id),
 			["truth", "goal"],
 			"rewrite persisted",
 		);
 	});
 
 	it("parse failures collect EVERY problem with line numbers and persist nothing", async () => {
-		const chatId = newChat("Plan: bad parse");
+		const chatId = (await newChat("Plan: bad parse"));
 		const tools = planTools({ chatId, chatStore });
 
 		const res = await exec(tools, "plan_init", {
@@ -172,11 +172,11 @@ describe("plan_init — the author-once mermaid tool (execute against the real s
 		assert.match(err, /line 4/);
 		// Context diet (2026-10-09): failures carry just the error — no tree echo.
 		assert.equal(res.tree, undefined);
-		assert.equal(chatStore.getChat(chatId)!.tree, undefined, "nothing persisted on failure");
+		assert.equal((await chatStore.getChat(chatId))!.tree, undefined, "nothing persisted on failure");
 	});
 
 	it("structural failures (cycle) become ok:false without persisting", async () => {
-		const chatId = newChat("Plan: cycle");
+		const chatId = (await newChat("Plan: cycle"));
 		const tools = planTools({ chatId, chatStore });
 		const res = await exec(tools, "plan_init", {
 			mermaid: "graph TD\n  a[A] --> b[B]\n  b --> a\n",

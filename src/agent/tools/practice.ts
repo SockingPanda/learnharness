@@ -32,12 +32,12 @@ import { healEncodedArguments, healToolRecord } from "./heal.ts";
 /** The record-reading context the gates need (the plan-tools idiom). */
 export interface PracticeToolContext {
 	chatId: string;
-	chatStore: { getChat(id: string): { messages: LhMessage[]; kind?: string } | null };
+	chatStore: { getChat(id: string): Promise<{ messages: LhMessage[]; kind?: string; deleting?: unknown } | null> };
 	/** The WHOLE-graph node list, read fresh per pose (owner round 9 — the
 	 *  mastery-trace contract): targets validate against every proposition,
 	 *  not just the session's picks, so pickless sessions and future
 	 *  graph-tools poses stay valid. Absent (tests) = no validation. */
-	graphNodes?: () => ReadonlyArray<Pick<import("../../core/contracts/graph.ts").GraphNode, "id" | "name">>;
+	graphNodes?: () => ReadonlyArray<Pick<import("../../core/contracts/graph.ts").GraphNode, "id" | "name">> | Promise<ReadonlyArray<Pick<import("../../core/contracts/graph.ts").GraphNode, "id" | "name">>>;
 	/** THE RARELY-NEEDED SET (owner round 10, 2026-10-05): the map readers
 	 *  behind the SAME settings gate as the prober's (graphToolsEnabled at
 	 *  the composition root); the research + pdf jobs (both keyless).
@@ -58,13 +58,20 @@ export interface PracticeToolContext {
  *  this closure — the intra-turn truth the record cannot hold yet. */
 export interface PracticeGate {
 	problemActive: boolean;
+	ready?: Promise<void>;
 }
 
 /** Seed the turn's gate from the record (result-aware activeProblemOf —
  *  only a cleanly-posed problem counts). */
 export function createPracticeGate(ctx: PracticeToolContext): PracticeGate {
-	const record = ctx.chatStore.getChat(ctx.chatId);
-	return { problemActive: record ? activeProblemOf(record.messages) !== null : false };
+	const gate: PracticeGate = { problemActive: false };
+	gate.ready = Promise.resolve(ctx.chatStore.getChat(ctx.chatId)).then((record) => {
+		if (record?.deleting) throw new Error("This practice session is being deleted.");
+		gate.problemActive = record ? activeProblemOf(record.messages) !== null : false;
+	});
+	// Keep construction synchronous; executions observe and surface failures.
+	void gate.ready.catch(() => undefined);
+	return gate;
 }
 
 // ─── problem: the pose ───────────────────────────────────────────────────────
@@ -98,6 +105,7 @@ export function problemTool(
 	gate: PracticeGate,
 	graphNodes?: PracticeToolContext["graphNodes"],
 ): AgentTool<typeof problemInputObject> {
+	let preparedNodes: ReturnType<NonNullable<PracticeToolContext["graphNodes"]>> | undefined;
 	return {
 		name: "problem",
 		label: "problem",
@@ -127,6 +135,11 @@ export function problemTool(
 				return { ...(healed as Record<string, unknown>), target: undefined } as never;
 			}
 			const list = graphNodes();
+			preparedNodes = list;
+			if (!Array.isArray(list)) {
+				void Promise.resolve(list).catch(() => undefined);
+				return healed as never;
+			}
 			const normalized = target.map((t) =>
 				typeof t === "string" ? (resolveTargetId(t, list) ?? t) : t,
 			);
@@ -134,6 +147,7 @@ export function problemTool(
 			return { ...(healed as Record<string, unknown>), target: normalized } as never;
 		},
 		execute: async (_toolCallId, input) => {
+			await gate.ready;
 			if (gate.problemActive) {
 				return invalidInputResult("problem", [
 					"a problem is already active — call conclude on it before posing the next one",
@@ -146,7 +160,9 @@ export function problemTool(
 			// sits in the agent's context (the [id] marker); no re-listing.
 			// The message teaches the exit: omitting always works.
 			if (graphNodes && input.target && input.target.length > 0) {
-				const list = graphNodes();
+				const list = await (preparedNodes ?? graphNodes());
+				preparedNodes = undefined;
+				input.target = input.target.map((target) => resolveTargetId(target, list) ?? target);
 				const unknown = input.target.filter((t) => resolveTargetId(t, list) === null);
 				if (unknown.length > 0) {
 					return invalidInputResult("problem", [
@@ -210,6 +226,7 @@ export function concludeTool(gate: PracticeGate): AgentTool<typeof concludeInput
 		prepareArguments: (args: unknown) => healEncodedArguments(args, concludeInputObject) as never,
 		executionMode: "sequential",
 		execute: async (_toolCallId, _input) => {
+			await gate.ready;
 			if (!gate.problemActive) {
 				return invalidInputResult("conclude", ["no active problem to conclude — pose one first"]);
 			}

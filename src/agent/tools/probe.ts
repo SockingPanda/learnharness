@@ -63,7 +63,7 @@ export function probeDoneTool(ctx: ProbeDoneContext): Record<string, AgentTool<a
 			// parse seam (tool-parts.ts) runs, so boundary-valid ⇔ consumer-parseable.
 			parameters: probeDoneInputSchema,
 			execute: serverExecute("probe_done", probeDoneInputSchema, async (input) => {
-				const record = ctx.chatStore.getChat(ctx.chatId);
+				const record = await ctx.chatStore.getChat(ctx.chatId);
 				if (!record) return { ok: false, error: `Chat not found: ${ctx.chatId}` };
 
 				if (danglingQuestionOf(record.messages) !== null) {

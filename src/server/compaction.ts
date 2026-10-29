@@ -46,6 +46,7 @@ import {
 } from "../core/index.ts";
 import { emit } from "../core/events.ts";
 import type { ChatStore } from "../core/ports.ts";
+import { isStorageStopping } from "../core/storage-lifecycle.ts";
 import type { PiEngine } from "../agent/models.ts";
 import { runSubagent } from "../agent/subagents/pi-run.ts";
 
@@ -57,10 +58,10 @@ const SUMMARIZER_SYSTEM_PROMPT =
 /** The one-shot summary call: zero tools, one turn, text out. The engine
  *  is the chat's own conversation engine (owner ruling: the session's
  *  model writes its own summary). Injectable for tests. */
-export type Summarizer = (prompt: string, engine: PiEngine) => Promise<{ summary: string; usage: Usage }>;
+export type Summarizer = (prompt: string, engine: PiEngine, signal?: AbortSignal) => Promise<{ summary: string; usage: Usage }>;
 
 /** The production summarizer over the sub-agent seam. */
-async function subagentSummarizer(prompt: string, engine: PiEngine): Promise<{ summary: string; usage: Usage }> {
+async function subagentSummarizer(prompt: string, engine: PiEngine, signal?: AbortSignal): Promise<{ summary: string; usage: Usage }> {
 	let usage: Usage = {
 		input: 0,
 		output: 0,
@@ -79,6 +80,7 @@ async function subagentSummarizer(prompt: string, engine: PiEngine): Promise<{ s
 		engine,
 		systemPrompt: SUMMARIZER_SYSTEM_PROMPT,
 		maxTurns: 1,
+		abortSignal: signal,
 		onUsage: (u) => {
 			usage = u;
 		},
@@ -120,6 +122,7 @@ export interface CompactionDeps {
 
 interface CompactionState {
 	inFlight: Map<string, Promise<void>>;
+	controllers?: Map<string, AbortController>;
 }
 const g = globalThis as typeof globalThis & { __lhCompaction?: CompactionState };
 function state(): CompactionState {
@@ -137,6 +140,15 @@ export function compactionInFlight(chatId: string): boolean {
 export async function awaitCompaction(chatId: string): Promise<void> {
 	const running = state().inFlight.get(chatId);
 	if (running) await running;
+}
+
+/** Stop model work while retaining each run until its final persistence settles. */
+export function abortCompactions(): void {
+	for (const controller of state().controllers?.values() ?? []) controller.abort();
+}
+
+export async function awaitCompactions(): Promise<void> {
+	while (state().inFlight.size > 0) await Promise.allSettled([...state().inFlight.values()]);
 }
 
 // ─── the effective threshold (owner ruling: min(setting, window − reserve)) ─
@@ -173,9 +185,9 @@ export function projectedContextTokens(messages: readonly LhMessage[], systemPro
  *  caller — ensureCompacted). Reads the record fresh, cuts, summarizes,
  *  appends the marker, records usage, notifies. Never throws upward
  *  past the registry cleanup. */
-async function compact(deps: CompactionDeps, chatId: string): Promise<void> {
-	const record = deps.chatStore.getChat(chatId);
-	if (!record) return;
+async function compact(deps: CompactionDeps, chatId: string, signal: AbortSignal): Promise<void> {
+	const record = await deps.chatStore.getChat(chatId);
+	if (!record || record.deleting || isStorageStopping() || signal.aborted) return;
 	const messages = record.messages;
 	const tokensBefore = projectedContextTokens(messages, deps.systemPromptTokens);
 	if (tokensBefore <= deps.thresholdTokens) return; // settled beneath while we waited
@@ -226,7 +238,8 @@ async function compact(deps: CompactionDeps, chatId: string): Promise<void> {
 	emit("compaction-changed", { chatId, running: true });
 	try {
 		const summarize = deps.summarize ?? subagentSummarizer;
-		const { summary, usage } = await summarize(prompt, deps.engine);
+		const { summary, usage } = await summarize(prompt, deps.engine, signal);
+		if (signal.aborted) return;
 		const trimmed = summary.trim();
 		if (!trimmed) return; // an empty summary is a refusal artifact — leave the record honest
 
@@ -238,11 +251,11 @@ async function compact(deps: CompactionDeps, chatId: string): Promise<void> {
 			at: new Date().toISOString(),
 		};
 		const marker = newCompactionMarker(trimmed, details);
-		deps.chatStore.saveMessages(chatId, [...messages, marker]);
+		await deps.chatStore.appendMessages(chatId, [marker]);
 		// The money channel: the summary is a real model call on the
 		// session's own engine — its usage keys to the marker (provenance:
 		// the transcript shows the compaction divider at the marker).
-		deps.chatStore.appendTurnUsage(chatId, {
+		await deps.chatStore.appendTurnUsage(chatId, {
 			id: crypto.randomUUID(),
 			messageId: marker.id,
 			at: details.at,
@@ -265,7 +278,7 @@ async function compact(deps: CompactionDeps, chatId: string): Promise<void> {
 		// A failed compaction leaves the record untouched — the next
 		// turn-start gate retries (the same self-healing law as the
 		// extraction trigger).
-		console.error(`[chat ${chatId}] compaction failed:`, err);
+		if (!signal.aborted) console.error(`[chat ${chatId}] compaction failed:`, err);
 	} finally {
 		emit("compaction-changed", { chatId, running: false });
 	}
@@ -281,19 +294,23 @@ export async function ensureCompacted(deps: CompactionDeps, chatId: string): Pro
 	// Skipped under tests, the extraction-trigger precedent: scripted
 	// chats are fixtures — the service itself is tested directly with an
 	// injected summarizer.
-	if (process.env.NODE_ENV === "test" && !deps.summarize) return;
+	if (isStorageStopping() || (process.env.NODE_ENV === "test" && !deps.summarize)) return;
 	await awaitCompaction(chatId);
-	if (deps.canStart?.() === false) return;
-	const record = deps.chatStore.getChat(chatId);
-	if (!record) return;
+	if (isStorageStopping() || deps.canStart?.() === false) return;
+	const record = await deps.chatStore.getChat(chatId);
+	if (!record || record.deleting || isStorageStopping()) return;
 	if (projectedContextTokens(record.messages, deps.systemPromptTokens) <= deps.thresholdTokens) return;
-	if (state().inFlight.has(chatId)) return; // a concurrent caller started it while we awaited
-	const run = compact(deps, chatId);
+	const concurrent = state().inFlight.get(chatId);
+	if (concurrent) { await concurrent; return; } // async reads must still join the structural gate
+	const controller = new AbortController();
+	(state().controllers ??= new Map()).set(chatId, controller);
+	const run = compact(deps, chatId, controller.signal);
 	state().inFlight.set(chatId, run);
 	try {
 		await run;
 	} finally {
 		state().inFlight.delete(chatId);
+		state().controllers?.delete(chatId);
 	}
 }
 
@@ -305,14 +322,31 @@ export async function ensureCompacted(deps: CompactionDeps, chatId: string): Pro
  * are silent no-ops. The next turn's ensureCompacted gate picks up
  * whatever this leaves running.
  */
-export function kickCompaction(buildDeps: () => CompactionDeps | null, chatId: string): void {
-	if (state().inFlight.has(chatId)) return;
-	const deps = buildDeps();
-	if (!deps || deps.canStart?.() === false) return;
-	const record = deps.chatStore.getChat(chatId);
-	if (!record) return;
-	if (projectedContextTokens(record.messages, deps.systemPromptTokens) <= deps.thresholdTokens) return;
-	const run = compact(deps, chatId);
+export function kickCompaction(buildDeps: () => CompactionDeps | null | Promise<CompactionDeps | null>, chatId: string): void {
+	if (isStorageStopping() || state().inFlight.has(chatId)) return;
+	const built = buildDeps();
+	if (!(built instanceof Promise) && (!built || built.canStart?.() === false)) return;
+	// Claim before asynchronous reads so another request sees the structural
+	// compaction gate while this run checks its prerequisites.
+	const controller = new AbortController();
+	(state().controllers ??= new Map()).set(chatId, controller);
+	const run = (async () => {
+		const deps = await built;
+		if (!deps || isStorageStopping() || deps.canStart?.() === false) return;
+		const record = await deps.chatStore.getChat(chatId);
+		if (!record || record.deleting || isStorageStopping()) return;
+		if (projectedContextTokens(record.messages, deps.systemPromptTokens) <= deps.thresholdTokens) return;
+		await compact(deps, chatId, controller.signal);
+	})();
 	state().inFlight.set(chatId, run);
-	void run.finally(() => state().inFlight.delete(chatId));
+	const clear = () => {
+		if (state().inFlight.get(chatId) === run) {
+			state().inFlight.delete(chatId);
+			state().controllers?.delete(chatId);
+		}
+	};
+	void run.then(clear, (error) => {
+		clear();
+		console.error(`[chat ${chatId}] compaction kickoff failed:`, error);
+	});
 }

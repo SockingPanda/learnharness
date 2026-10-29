@@ -32,7 +32,8 @@ import {
 import { runPiTurn } from "./pi/ui-stream.ts";
 import { collectToolCallIds } from "./pi/call-ids.ts";
 import { providerEventNote } from "../agent/provider-events.ts";
-import { effectiveSettings, stores } from "./stores.ts";
+import { effectiveSettings, stores, storageMode, storageMutationResponse } from "./stores.ts";
+import { isStorageStopping, StorageStoppingError } from "../core/storage-lifecycle.ts";
 import { searchAvailable, searchProvider } from "./search.ts";
 import { providerKeyPresent } from "./keys.ts";
 import { CLAUDE_CODE_PROVIDER } from "../core/contracts/claude-code.ts";
@@ -45,8 +46,9 @@ import {
 import { modelsNotConfigured, providerKeyMissing as providerKeyMissingEnvelope, type ProviderKeyMissing } from "../core/settings.ts";
 import { beginTurn, endTurn } from "./turn-liveness.ts";
 import { applyParkedDismissal } from "./dismissal-park.ts";
-import { registerTurn, rememberTurnFailure, unregisterTurn } from "./turn-runs.ts";
+import { registerTurn, registerPendingTurnAbort, unregisterPendingTurnAbort, rememberTurnFailure, unregisterTurn } from "./turn-runs.ts";
 import { persistTurn, triggerExtraction, TurnPersistenceError } from "./turn-service.ts";
+import { withChatWrite } from "../core/storage-coordination.ts";
 import { hasProbeDone, danglingQuestionOf } from "../core/native-messages.ts";
 import { composeInstructions } from "../agent/teacher-agent.ts";
 import { ensureCompacted, kickCompaction, effectiveThresholdTokens } from "./compaction.ts";
@@ -162,6 +164,8 @@ export async function handleChatRequest(
 	req: Request,
 	buildAgent?: (opts: AgentBuildOptions & { teaching: boolean }) => TeachingAgent,
 ): Promise<Response> {
+	const unavailable = storageMutationResponse();
+	if (unavailable) return unavailable;
 	let body: { chatId?: unknown; input?: unknown };
 	try {
 		body = await req.json();
@@ -192,9 +196,18 @@ export async function handleChatInput(
 	input: TurnInput,
 	buildAgent?: (opts: AgentBuildOptions & { teaching: boolean }) => TeachingAgent,
 ): Promise<Response> {
-	let record = stores.chatStore.getChat(chatId);
-	if (!record) {
+	const unavailable = storageMutationResponse();
+	if (unavailable) return unavailable;
+	const tracksInterruptedTurns = storageMode() === "any";
+	const turnUsageId = crypto.randomUUID();
+	const preparing = new AbortController();
+	let record = await stores.chatStore.getChat(chatId);
+	if (!record || record.deleting) {
 		return Response.json({ error: "Unknown chat" }, { status: 404 });
+	}
+
+	if (tracksInterruptedTurns && record.pendingTurnId && (input.type === "continue" || input.type === "steers")) {
+		return Response.json({ error: "This turn was interrupted. Retry explicitly to continue." }, { status: 409 });
 	}
 
 	// Refuse an ineligible Retry before catalog refresh, compaction, or any
@@ -203,8 +216,10 @@ export async function handleChatInput(
 		try {
 			retryDrops(record.messages);
 		} catch (err) {
-			if (err instanceof ChatInputError) return Response.json({ error: err.message }, { status: 400 });
-			throw err;
+			if (!(tracksInterruptedTurns && record.pendingTurnId)) {
+				if (err instanceof ChatInputError) return Response.json({ error: err.message }, { status: 400 });
+				throw err;
+			}
 		}
 	}
 
@@ -259,6 +274,7 @@ export async function handleChatInput(
 	const lifecycle: SubscriptionDispatchLifecycle = {
 		captured: (scope) => requestCycle?.captured(scope),
 		beforeDispatch: (scope) => requestCycle?.beforeDispatch(scope),
+		didDispatch: (scope) => requestCycle?.didDispatch(scope),
 		noDispatch: (kind) => requestCycle?.noDispatch(kind),
 	};
 	let conversationEngine: PiEngine;
@@ -280,104 +296,70 @@ export async function handleChatInput(
 		},
 		chatId,
 	);
-	const compactedRecord = stores.chatStore.getChat(chatId);
-	if (!compactedRecord) return Response.json({ error: "Unknown chat" }, { status: 404 });
-	record = compactedRecord;
-	// Recompute Retry eligibility on current truth, still before beginTurn.
-	// A compaction marker or another writer may have landed during awaits.
-	// These omissions affect ONLY the agent context, never the saved record.
-	let retryOmissions = new Set<string>();
-	if (input.type === "retry") {
+	// Validation, turn ownership and the durable prefix share deletion's
+	// per-chat gate. No model request runs while this gate is held.
+	const prefix = await withChatWrite(chatId, async () => {
+		if (isStorageStopping()) return storageMutationResponse()!;
+		const current = await stores.chatStore.getChat(chatId);
+		if (isStorageStopping()) return storageMutationResponse()!;
+		if (!current || current.deleting) return Response.json({ error: "Unknown chat" }, { status: 404 });
+		if (tracksInterruptedTurns && current.pendingTurnId && (input.type === "continue" || input.type === "steers")) {
+			return Response.json({ error: "This turn was interrupted. Retry explicitly to continue." }, { status: 409 });
+		}
+		let retryOmissions = new Set<string>();
+		let appends;
 		try {
-			retryOmissions = retryDrops(record.messages);
-		} catch (err) {
-			if (err instanceof ChatInputError) return Response.json({ error: err.message }, { status: 400 });
-			throw err;
+			if (input.type === "retry") {
+				try { retryOmissions = retryDrops(current.messages); }
+				catch (error) { if (!(tracksInterruptedTurns && current.pendingTurnId)) throw error; }
+			}
+			appends = input.type === "steers"
+				? input.steers.filter((steer) => !steerDelivered(current.messages, steer.id))
+				: inputAppends(current, input);
+		} catch (error) {
+			if (error instanceof ChatInputError) return Response.json({ error: error.message }, { status: 400 });
+			throw error;
 		}
-	}
-
-	// The input's native appends (pure; the honest 400 for an answer with no
-	// pending question call). Computed BEFORE beginTurn so a refused input
-	// leaves no liveness effects; read against the CURRENT record. Wave C:
-	// the idle wake carries EVERY queued marker (steerDelivered filters a
-	// re-fire of an already-landed one) - with claimSteers gone, this wake
-	// input is the only steer appender; in-run delivery rides pi's own
-	// follow-up queue and never builds an input event at all.
-	let appends;
-	try {
-		appends =
-			input.type === "steers"
-				? input.steers.filter((s) => !steerDelivered(record.messages, s.id))
-				: inputAppends(record, input);
-	} catch (err) {
-		if (err instanceof ChatInputError) {
-			return Response.json({ error: err.message }, { status: 400 });
+		const merged = [...current.messages, ...appends];
+		if (input.type === "answer" && danglingQuestionOf(merged) !== null) {
+			try { await stores.chatStore.appendMessages(chatId, appends); }
+			catch (error) {
+				console.error(`[chat ${chatId}] write-ahead persist failed:`, error);
+				return new Response("Your input could not be saved. Please try again.", { status: 500 });
+			}
+			emit("record-changed", { chatId });
+			return settledTurnResponse();
 		}
-		throw err;
-	}
-
-	// THE PARALLEL-QUESTION GATE (owner, 2026-10-03 — the deepseek parallel
-	// batch incident): an answer that leaves a SIBLING question dangling
-	// defers its wake. The dock advances to the next question (the client's
-	// optimistic result + record-changed carry the view); the LAST answer
-	// fires the one reaction turn with every result ADJACENT to its calling
-	// assistant message — the provider shape law (a tool result appended
-	// after an intervening assistant message is rejected, which stranded
-	// the sibling question permanently pre-fix). Nothing else can generate
-	// while a question dangles (job wakes wait, continuation folds refuse,
-	// the composer gates), so adjacency holds by construction.
-	if (input.type === "answer" && danglingQuestionOf([...record.messages, ...appends]) !== null) {
-		const merged = [...record.messages, ...appends];
-		try { stores.chatStore.saveMessages(chatId, merged); }
-		catch (err) {
-			console.error(`[chat ${chatId}] write-ahead persist failed:`, err);
+		if (!beginTurn(chatId)) return Response.json({ error: "A turn is already running for this session" }, { status: 409 });
+		registerPendingTurnAbort(chatId, () => preparing.abort());
+		const agentMessages = input.type === "retry" ? merged.filter((message) => !retryOmissions.has(message.id)) : merged;
+		const stagedAutomatic = isSubscriptionProvider(conversation.provider) && input.type === "steers";
+		try {
+			if (tracksInterruptedTurns) await stores.chatStore.setPendingTurn(chatId, turnUsageId);
+			if (!stagedAutomatic) await stores.chatStore.appendMessages(chatId, appends);
+		} catch (error) {
+			console.error(`[chat ${chatId}] write-ahead persist failed:`, error);
+			unregisterPendingTurnAbort(chatId);
+			endTurn(chatId);
 			return new Response("Your input could not be saved. Please try again.", { status: 500 });
 		}
-		emit("record-changed", { chatId });
-		return settledTurnResponse(); // the cheap terminal — no beginTurn, no turn
-	}
-
-	// One turn per chat, ever. A second request while a turn runs means a
-	// stale/remounted client raced a live one — letting it through would
-	// double-run the teacher and clobber the first turn's persist.
-	if (!beginTurn(chatId)) {
-		console.info(`[chat ${chatId}] turn already in flight — request rejected`);
-		return Response.json({ error: "A turn is already running for this session" }, { status: 409 });
-	}
-
-	// Write-ahead persistence: the input's native appends go on disk BEFORE
-	// the turn starts - the learner's answer is durable the instant the
-	// request arrives, and any remount, second tab, or server crash reads
-	// truth instead of the pre-answer record. (Wave C: the wake's markers
-	// ride this same write-ahead - the pump de-queued them at fire, so this
-	// is the ONLY copy ever appended.)
-	const merged = [...record.messages, ...appends];
-	// Retry preserves every persisted attempt. Pi needs a non-assistant
-	// tail to start continue(), so its temporary history omits the trailing
-	// failures only. Count that SAME temporary prefix at settlement, or the
-	// retained failures would make persistTurn skip genuinely new output.
-	const agentMessages = input.type === "retry" ? merged.filter((m) => !retryOmissions.has(m.id)) : merged;
-	const stagedAutomatic = isSubscriptionProvider(conversation.provider) && input.type === "steers";
+		if (!stagedAutomatic) await noteSteersDurable(chatId, merged);
+		if (preparing.signal.aborted || isStorageStopping()) {
+			unregisterPendingTurnAbort(chatId);
+			rememberTurnFailure(chatId, "This turn was interrupted. Retry explicitly to continue.");
+			endTurn(chatId);
+			return Response.json({ error: "The turn stopped before the model request." }, { status: 409 });
+		}
+		return { record: current, appends, merged, agentMessages, stagedAutomatic };
+	});
+	if (prefix instanceof Response) return prefix;
+	record = prefix.record;
+	const { appends, merged, agentMessages, stagedAutomatic } = prefix;
 	let persistBaseCount = stagedAutomatic ? record.messages.length : agentMessages.length;
-	try {
-		if (!stagedAutomatic) stores.chatStore.saveMessages(chatId, merged);
-	} catch (err) {
-		console.error(`[chat ${chatId}] write-ahead persist failed:`, err);
-		endTurn(chatId);
-		return new Response("Your input could not be saved. Please try again.", { status: 500 });
-	}
-	// Visibility bookkeeping is not the canonical save. Its failure must
-	// neither misreport a saved input as lost nor prevent the turn running.
-	try {
-		if (!stagedAutomatic) noteSteersDurable(chatId, merged);
-	} catch (err) {
-		console.error(`[chat ${chatId}] input visibility bookkeeping failed:`, err);
-	}
 
 	// MONEY CHANNEL (wave 4): one collector per request, fed by the agent's
 	// message_end events. Every model call's usage lands in the chat record's
 	// append-only turns log at onFinish — idempotent per turn id.
-	const turnUsageId = crypto.randomUUID();
 	const steps: CallUsage[] = [];
 	const collectUsage = (usage: Usage) => {
 		steps.push({
@@ -415,107 +397,107 @@ export async function handleChatInput(
 	// enabled). The definitive toggleable set is TOGGLEABLE_TOOLS — the
 	// sub-agent JOB tools (research/demo/visual/pdf; adjudicated with the
 	// user: quiz/ask/fs/plan/probe_done are always-on).
-	if (isSubscriptionProvider(conversation.provider)) requestCycle = new SubscriptionRequestCycle({
-		initialMessages: asAgentMessages(agentMessages),
-		staged: stagedAutomatic ? asAgentMessages(appends) : undefined,
-		foregroundOwed: !callPurpose.background,
-		purpose: callPurpose,
-		scopeCurrent: (scope) => connectionScopeCurrent(conversation.provider, scope),
-		commitStaged: () => {
-			stores.chatStore.saveMessages(chatId, merged);
-			persistBaseCount = merged.length;
-			noteSteersDurable(chatId, merged);
-		},
-		restoreAutomatic: (automaticIds, retainedIds) => restoreUncommittedAutomatic(chatId, constructed, automaticIds, retainedIds),
-	});
-	const agentOpts: AgentBuildOptions = {
-		engine,
-		callPurpose,
-		requestCycle,
-		messages: asAgentMessages(agentMessages),
-		onUsage: collectUsage,
-		toolToggles: effective.agent.tools,
-		// Debug (owner, 2026-10-04): teacher/prober raw provider events under
-		// LH_PROVIDER_EVENTS=1 (provider-events.ts); no-op otherwise.
-		chatId,
-		// The prompt-override switches (P2, 2026-09-19): same resolution
-		// point as the tool delta — the agent layer composes the system
-		// prompt fresh per turn, swapping in any enabled override segments.
-		promptSwitches: effective.agent.prompts,
-		...(record.kind === "reading" ? { readingContext: readingSessionContext(merged) } : {}),
-	};
-	// PRACTICE BRANCH (owner design, 2026-10-04): a kind:"practice"
-	// session builds the practitioner from turn 1 — no prober→teacher
-	// split, no plan/question/job tools; the whole registry is
-	// problem + conclude. buildAgent stays honored (the test seam is
-	// uniform across kinds).
-	const constructed: TeachingAgent = buildAgent
-		? buildAgent({ ...agentOpts, teaching })
-		: record.kind === "reading"
-			? createReadingAgent({ chatId, chatStore: stores.chatStore,
-				loadSource: createReadingSourceLoader(stores.readingSourceStore, { chatStore: stores.chatStore }),
-				...(graphToolsEnabled(effective) ? { graphStore: stores.graphStore } : {}),
-			}, agentOpts)
-		: record.kind === "practice"
-			? createPracticeAgent(
-					{
-						chatId,
-						chatStore: stores.chatStore,
-						// TARGET VALIDATION (owner round 9): the practice tools read the
-						// WHOLE graph fresh per pose — targets validate against every
-						// proposition, not just the session's picks (pickless sessions
-						// and future graph-tools poses stay valid).
-						graphNodes: () => stores.graphStore.readNodes(),
-						// THE RARELY-NEEDED SET (owner round 10): research + pdf jobs
-						// (same runner/gating as the teacher's — research honestly
-						// absent when no engine is live) and the map readers behind
-						// the SAME settings gate as the prober's.
-						jobs: {
+	try {
+		if (isSubscriptionProvider(conversation.provider)) requestCycle = new SubscriptionRequestCycle({
+			initialMessages: asAgentMessages(agentMessages),
+			staged: stagedAutomatic ? asAgentMessages(appends) : undefined,
+			foregroundOwed: !callPurpose.background,
+			purpose: callPurpose,
+			scopeCurrent: (scope) => connectionScopeCurrent(conversation.provider, scope),
+			commitStaged: async () => {
+				await stores.chatStore.appendMessages(chatId, appends);
+				persistBaseCount = merged.length;
+				await noteSteersDurable(chatId, merged);
+			},
+			restoreAutomatic: (automaticIds, retainedIds) => restoreUncommittedAutomatic(chatId, constructed, automaticIds, retainedIds),
+		});
+		const agentOpts: AgentBuildOptions = {
+			engine,
+			callPurpose,
+			requestCycle,
+			messages: asAgentMessages(agentMessages),
+			onUsage: collectUsage,
+			toolToggles: effective.agent.tools,
+			// Debug (owner, 2026-10-04): teacher/prober raw provider events under
+			// LH_PROVIDER_EVENTS=1 (provider-events.ts); no-op otherwise.
+			chatId,
+			// The prompt-override switches (P2, 2026-09-19): same resolution
+			// point as the tool delta — the agent layer composes the system
+			// prompt fresh per turn, swapping in any enabled override segments.
+			promptSwitches: effective.agent.prompts,
+			...(record.kind === "reading" ? { readingContext: readingSessionContext(merged) } : {}),
+		};
+		// PRACTICE BRANCH (owner design, 2026-10-04): a kind:"practice"
+		// session builds the practitioner from turn 1 — no prober→teacher
+		// split, no plan/question/job tools; the whole registry is
+		// problem + conclude. buildAgent stays honored (the test seam is
+		// uniform across kinds).
+		const constructed: TeachingAgent = buildAgent
+			? buildAgent({ ...agentOpts, teaching })
+			: record.kind === "reading"
+				? createReadingAgent({ chatId, chatStore: stores.chatStore,
+					loadSource: createReadingSourceLoader(stores.readingSourceStore, { chatStore: stores.chatStore }),
+					...(graphToolsEnabled(effective) ? { graphStore: stores.graphStore } : {}),
+				}, agentOpts)
+			: record.kind === "practice"
+				? createPracticeAgent(
+						{
 							chatId,
+							chatStore: stores.chatStore,
+							// TARGET VALIDATION (owner round 9): the practice tools read the
+							// WHOLE graph fresh per pose — targets validate against every
+							// proposition, not just the session's picks (pickless sessions
+							// and future graph-tools poses stay valid).
+							graphNodes: () => stores.graphStore.readNodes(),
+							// THE RARELY-NEEDED SET (owner round 10): research + pdf jobs
+							// (same runner/gating as the teacher's — research honestly
+							// absent when no engine is live) and the map readers behind
+							// the SAME settings gate as the prober's.
+							jobs: {
+								chatId,
+								jobStore: stores.jobStore,
+								spawn: (job, input) => void jobRunner.runJob(job.id, input),
+								searchAvailable,
+							},
+							...(graphToolsEnabled(effective) ? { graph: { chatStore: stores.chatStore, graphStore: stores.graphStore } } : {}),
+						},
+						agentOpts,
+					)
+				: teaching
+				? createTeacherAgent(
+						{
+							chatId,
+							chatStore: stores.chatStore,
+							jobStore: stores.jobStore,
+							spawn: (job, input) => void jobRunner.runJob(job.id, input),
+							// The registry drop's signal (2026-09-20): no live engine
+							// = no research tool in the teacher's registry.
+							searchAvailable,
+						},
+						agentOpts,
+					)
+				: createProberAgent(
+						{
+							chatId,
+							chatStore: stores.chatStore,
+							deliver: (steer) => void deliverJobResult(steer),
+							// Fix wave (2026-09-20): the prober carries research + pdf
+							// dispatch (owner ruling — phase-omnipresent), so its ctx
+							// needs the same job wiring as the teacher's.
 							jobStore: stores.jobStore,
 							spawn: (job, input) => void jobRunner.runJob(job.id, input),
 							searchAvailable,
+							// The map reader (wave 7): the prober reads the learner's
+							// knowledge graph through tools when the gate opens —
+							// graph master switch AND the agent.graphTools toggle.
+							...(graphToolsEnabled(effective) ? { graphStore: stores.graphStore } : {}),
 						},
-						...(graphToolsEnabled(effective) ? { graph: { chatStore: stores.chatStore, graphStore: stores.graphStore } } : {}),
-					},
-					agentOpts,
-				)
-			: teaching
-			? createTeacherAgent(
-					{
-						chatId,
-						chatStore: stores.chatStore,
-						jobStore: stores.jobStore,
-						spawn: (job, input) => void jobRunner.runJob(job.id, input),
-						// The registry drop's signal (2026-09-20): no live engine
-						// = no research tool in the teacher's registry.
-						searchAvailable,
-					},
-					agentOpts,
-				)
-			: createProberAgent(
-					{
-						chatId,
-						chatStore: stores.chatStore,
-						deliver: (steer) => void deliverJobResult(steer),
-						// Fix wave (2026-09-20): the prober carries research + pdf
-						// dispatch (owner ruling — phase-omnipresent), so its ctx
-						// needs the same job wiring as the teacher's.
-						jobStore: stores.jobStore,
-						spawn: (job, input) => void jobRunner.runJob(job.id, input),
-						searchAvailable,
-						// The map reader (wave 7): the prober reads the learner's
-						// knowledge graph through tools when the gate opens —
-						// graph master switch AND the agent.graphTools toggle.
-						...(graphToolsEnabled(effective) ? { graphStore: stores.graphStore } : {}),
-					},
-					agentOpts,
-				);
+						agentOpts,
+					);
 
-	// A test-injected agent gets no usage collector (tests assert the
-	// transcript, not the money channel); when it's ours, usage flows through
-	// the factory's subscription (wired above via onUsage).
-	try {
+		// A test-injected agent gets no usage collector (tests assert the
+		// transcript, not the money channel); when it's ours, usage flows through
+		// the factory's subscription (wired above via onUsage).
 		// THE TURN AS A BACKGROUND OBJECT (owner ruling, 2026-09-25):
 		// runPiTurn executes decoupled from this response — the POST stream
 		// is just the FIRST subscriber (a view). A client disconnect can no
@@ -529,8 +511,10 @@ export async function handleChatInput(
 		// run's first LLM call (the native replacement for continuation
 		// coalescing). Settlement still cannot beat the flow below: it needs
 		// a streamed response, which never happens inside the constructor.
-		registerLiveAgent(chatId, constructed, input.type !== "steers" && input.type !== "continue",
+		await registerLiveAgent(chatId, constructed, input.type !== "steers" && input.type !== "continue",
 			input.type === "steers" ? new Set(appends.map((message) => message.id)) : undefined);
+		if (isStorageStopping()) throw new StorageStoppingError();
+		preparing.signal.throwIfAborted();
 		// Debug recorder run marker (owner, 2026-10-04): correlates the
 		// JSONL event stream with the record's turns; no-op unless
 		// LH_PROVIDER_EVENTS=1.
@@ -559,7 +543,7 @@ export async function handleChatInput(
 				return "An error occurred.";
 			},
 			onSettleError: settlementErrorText,
-			onSettleFailure: (error, reportedErrorText) => {
+			onSettleFailure: async (error, reportedErrorText) => {
 				// POST only acknowledges acceptance; the submitter may attach
 				// after this turn has already failed and left the registry.
 				rememberTurnFailure(chatId, reportedErrorText ?? settlementErrorText(error));
@@ -569,21 +553,21 @@ export async function handleChatInput(
 				// The canonical save may have succeeded before later bookkeeping
 				// threw. Reconcile against actual durability, never replay input
 				// merely because usage/extraction/other settlement work failed.
-				const persisted = stores.chatStore.getChat(chatId)?.messages ?? [];
+				const persisted = (await stores.chatStore.getChat(chatId))?.messages ?? [];
 				reconcileUserSteers(chatId, persisted);
 				settleSteers(chatId, persisted, true, constructed);
 			},
-			onFinish: (turnMessages, isAborted) => {
+			onFinish: async (turnMessages, isAborted, didFail) => {
 				// Wave B: append only messages past the temporary agent prefix.
 				// Retry's saved record still includes its earlier failed attempts.
-				const stamped = persistTurn(stores.chatStore, chatId, persistBaseCount, turnMessages, isAborted);
-				noteSteersDurable(chatId, stores.chatStore.getChat(chatId)?.messages ?? stamped);
+				const stamped = await persistTurn(stores.chatStore, chatId, persistBaseCount, turnMessages, isAborted);
+				await noteSteersDurable(chatId, (await stores.chatStore.getChat(chatId))?.messages ?? stamped);
 				// usage log append (idempotent per turn id) — the stats bar
 				// refolds this on the client after the turn settles. The
 				// provenance message is the turn's FIRST new assistant message.
 				const response = stamped.find((m) => (m as { role?: string }).role === "assistant");
 				if (response && steps.length > 0) {
-					stores.chatStore.appendTurnUsage(chatId, {
+					await stores.chatStore.appendTurnUsage(chatId, {
 						id: turnUsageId,
 						messageId: response.id,
 						at: new Date().toISOString(),
@@ -600,7 +584,7 @@ export async function handleChatInput(
 					// Fresh per-turn read of the graph section's chunk budget
 					// (extraction-UX redesign, 2026-09-24): the trigger compares
 					// against it and the pipeline's batches share it.
-					triggerExtraction(stores, extraction, chatId, effective.graph.extractionChunkTokens);
+					void triggerExtraction(stores, extraction, chatId, effective.graph.extractionChunkTokens);
 				}
 				// PARKED DISMISSAL (owner, 2026-10-04): a dismissal that arrived
 				// mid-turn was parked by the dismiss route (202); now that
@@ -608,21 +592,17 @@ export async function handleChatInput(
 				// real truth — BEFORE endTurn, so "turn-settled" guarantees a
 				// subsequent fetch reads the dismissal already in the record
 				// (the same ordering law as persistTurn itself).
-				applyParkedDismissal(stores.chatStore, chatId);
-				// LAST: a poller that sees not-in-flight must read an already-persisted
-				// record — endTurn only after persistTurn has done its job.
-				endTurn(chatId);
-				// And only then does the turn stop being a running object
-				// (background-turn wave, 2026-09-25): a reattach that finds
-				// nothing must find the persisted record current — the same
-				// ordering rule as endTurn.
-				unregisterTurn(chatId);
-				// Wave C steer settlement: the live agent is dead (no more
-				// followUp handoffs) - reconcile the steer registry against
-				// what this run actually persisted (in-run injections
-				// resolve; stranded markers return to pending), then let
-				// the pump take any stragglers down the idle wake.
-				unregisterLiveAgent(chatId);
+				await withChatWrite(chatId, async () => {
+					// A concurrent dismissal must either join this park before we
+					// apply it, or see the fully settled turn after this gate opens.
+					await applyParkedDismissal(stores.chatStore, chatId);
+					if (tracksInterruptedTurns && !isAborted && !didFail && !isStorageStopping() && (!requestCycle || requestCycle.dispatched)) {
+						await stores.chatStore.setPendingTurn(chatId, null);
+					}
+					endTurn(chatId);
+					unregisterTurn(chatId);
+					unregisterLiveAgent(chatId);
+				});
 				settleSteers(chatId, stamped, false, constructed);
 				// Composer steers (2026-10-03): delivered ids dropped, stranded
 				// ones stay parked for the chat's next run (the registry is the
@@ -638,14 +618,14 @@ export async function handleChatInput(
 				// tests (the extraction precedent — scripted chats are
 				// fixtures; the service itself is pinned directly).
 				if (process.env.NODE_ENV !== "test" && (!requestCycle || requestCycle.dispatched))
-					kickCompaction(() => {
+					kickCompaction(async () => {
 						const fresh = effectiveSettings();
-						const spec = resolveConversationSpec(stores.chatStore.getChat(chatId)?.settings, fresh.models.strong);
+						const spec = resolveConversationSpec((await stores.chatStore.getChat(chatId))?.settings, fresh.models.strong);
 						if (!spec || !connectionBackgroundAllowed(spec.provider)) return null;
 						let kickEngine: PiEngine;
 						try { kickEngine = piEngineForSpec(spec, true); } catch { return null; }
 						const kickModelId = `${kickEngine.model.provider}:${kickEngine.model.id}`;
-						const freshRecord = stores.chatStore.getChat(chatId);
+						const freshRecord = await stores.chatStore.getChat(chatId);
 						if (!freshRecord) return null;
 						return {
 							chatStore: stores.chatStore,
@@ -682,10 +662,13 @@ export async function handleChatInput(
 	} catch (err) {
 		// The stream never started, so no onFinish will fire — clear the registry
 		// or a malformed request would lock the chat until the TTL eviction.
+		unregisterPendingTurnAbort(chatId);
 		endTurn(chatId);
 		// Wave C: the live-agent registration (if it happened) dies with the
 		// turn here too - nothing was handed (the loop never ticked).
 		unregisterLiveAgent(chatId);
+		if (tracksInterruptedTurns) rememberTurnFailure(chatId, "This turn was interrupted. Retry explicitly to continue.");
+		if (err instanceof StorageStoppingError) return storageMutationResponse()!;
 		console.error(`[chat ${chatId}] turn failed to start:`, err);
 		return Response.json({ error: "Failed to start the turn" }, { status: 500 });
 	}

@@ -58,18 +58,18 @@ test("legacy flat-rate jobs remain priceable; missing usage stays absent", () =>
 	assert.ok(jobCost(job)! > 0);
 });
 
-test("appendTurnUsage: idempotent per turn; continuations survive saveMessages; list omits log", () => {
-	const record = chatStore.createChat("usage fixture");
+test("appendTurnUsage: idempotent per turn; continuations survive saveMessages; list omits log", async () => {
+	const record = (await chatStore.createChat("usage fixture"));
 	try {
 		const entry: TurnUsage = { id: "turn_1", messageId: "msg_a", at: "x", model: "openai:gpt-5", steps: [call({ inputTokens: 100, outputTokens: 10, cacheWrite1hTokens: 0 })] };
-		chatStore.appendTurnUsage(record.id, entry);
-		chatStore.appendTurnUsage(record.id, entry);
-		chatStore.appendTurnUsage(record.id, { ...entry, id: "turn_2" });
-		assert.equal(chatStore.getChat(record.id)?.turns?.length, 2);
-		chatStore.saveMessages(record.id, [{ id: "msg_a", role: "user", content: "fixture", timestamp: 1 }]);
-		assert.deepEqual(chatStore.getChat(record.id)?.turns?.[0]?.steps, JSON.parse(JSON.stringify(entry.steps)));
-		assert.equal(chatStore.getChat(record.id)?.turns?.length, 2);
-		assert.equal("turns" in chatStore.listChats().find((c) => c.id === record.id)!, false);
+		(await chatStore.appendTurnUsage(record.id, entry));
+		(await chatStore.appendTurnUsage(record.id, entry));
+		(await chatStore.appendTurnUsage(record.id, { ...entry, id: "turn_2" }));
+		assert.equal((await chatStore.getChat(record.id))?.turns?.length, 2);
+		(await chatStore.saveMessages(record.id, [{ id: "msg_a", role: "user", content: "fixture", timestamp: 1 }]));
+		assert.deepEqual((await chatStore.getChat(record.id))?.turns?.[0]?.steps, JSON.parse(JSON.stringify(entry.steps)));
+		assert.equal((await chatStore.getChat(record.id))?.turns?.length, 2);
+		assert.equal("turns" in (await chatStore.listChats()).find((c) => c.id === record.id)!, false);
 	} finally { fs.unlinkSync(`${PATHS.chats}/${record.id}.json`); }
 });
 
@@ -81,32 +81,32 @@ const runEntry = (startedAt: number): ExtractionRunUsage => ({
 	},
 });
 
-test("appendExtractionUsage: idempotent; failed runs persist; list omits log", () => {
-	const record = chatStore.createChat("extraction usage fixture");
+test("appendExtractionUsage: idempotent; failed runs persist; list omits log", async () => {
+	const record = (await chatStore.createChat("extraction usage fixture"));
 	try {
-		chatStore.appendExtractionUsage(record.id, runEntry(1));
-		chatStore.appendExtractionUsage(record.id, runEntry(1));
-		chatStore.appendExtractionUsage(record.id, runEntry(2));
-		chatStore.appendExtractionUsage(record.id, { ...runEntry(3), stats: undefined });
-		assert.equal(chatStore.getChat(record.id)?.extractions?.length, 3);
-		assert.equal(chatStore.getChat(record.id)?.extractions?.at(-1)?.stats, undefined);
-		assert.equal("extractions" in chatStore.listChats().find((c) => c.id === record.id)!, false);
+		(await chatStore.appendExtractionUsage(record.id, runEntry(1)));
+		(await chatStore.appendExtractionUsage(record.id, runEntry(1)));
+		(await chatStore.appendExtractionUsage(record.id, runEntry(2)));
+		(await chatStore.appendExtractionUsage(record.id, { ...runEntry(3), stats: undefined }));
+		assert.equal((await chatStore.getChat(record.id))?.extractions?.length, 3);
+		assert.equal((await chatStore.getChat(record.id))?.extractions?.at(-1)?.stats, undefined);
+		assert.equal("extractions" in (await chatStore.listChats()).find((c) => c.id === record.id)!, false);
 	} finally { fs.unlinkSync(`${PATHS.chats}/${record.id}.json`); }
 });
 
-test("appendSourceUsage: idempotent; reimport keeps history; absent source is a no-op", () => {
+test("appendSourceUsage: idempotent; reimport keeps history; absent source is a no-op", async () => {
 	fs.mkdirSync(PATHS.graph, { recursive: true });
 	const backup = fs.existsSync(SOURCES_FILE) ? fs.readFileSync(SOURCES_FILE) : undefined;
 	try {
 		const id = "src_usagetest01";
-		graphStore.upsertSource({ id, filePath: "/fixture/notes.md", importedAt: "2026-09-13T00:00:00Z" });
-		graphStore.appendSourceUsage(id, runEntry(1));
-		graphStore.appendSourceUsage(id, runEntry(1));
-		graphStore.appendSourceUsage(id, runEntry(2));
-		assert.equal(graphStore.readSources().find((s) => s.id === id)?.extractions?.length, 2);
-		graphStore.upsertSource({ id, filePath: "/fixture/notes.md", importedAt: "2026-09-14T00:00:00Z" });
-		assert.equal(graphStore.readSources().find((s) => s.id === id)?.extractions?.length, 2);
-		graphStore.appendSourceUsage("src_missing", runEntry(1));
+		(await graphStore.upsertSource({ id, filePath: "/fixture/notes.md", importedAt: "2026-09-13T00:00:00Z" }));
+		(await graphStore.appendSourceUsage(id, runEntry(1)));
+		(await graphStore.appendSourceUsage(id, runEntry(1)));
+		(await graphStore.appendSourceUsage(id, runEntry(2)));
+		assert.equal((await graphStore.readSources()).find((s) => s.id === id)?.extractions?.length, 2);
+		(await graphStore.upsertSource({ id, filePath: "/fixture/notes.md", importedAt: "2026-09-14T00:00:00Z" }));
+		assert.equal((await graphStore.readSources()).find((s) => s.id === id)?.extractions?.length, 2);
+		(await graphStore.appendSourceUsage("src_missing", runEntry(1)));
 	} finally {
 		if (backup) fs.writeFileSync(SOURCES_FILE, backup);
 		else fs.rmSync(SOURCES_FILE, { force: true });

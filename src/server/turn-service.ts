@@ -25,6 +25,18 @@ import { coverageOf } from "../core/coverage.ts";
 import type { ChatStore, GraphStore } from "../core/ports.ts";
 import type { ExtractionPipeline } from "../agent/subagents/extraction.ts";
 import { ModelsNotConfiguredError, ProviderKeyMissingError } from "../core/settings.ts";
+import { isStorageStopping } from "../core/storage-lifecycle.ts";
+
+// A retry of one native message object reuses its append identity even if the
+// first database response was lost after commit. Existing native IDs win.
+const nativeMessageIds = new WeakMap<object, string>();
+function messageId(message: AgentMessage): string {
+	const existing = (message as LhMessage).id ?? nativeMessageIds.get(message);
+	if (existing) return existing;
+	const id = newMessageId();
+	nativeMessageIds.set(message, id);
+	return id;
+}
 
 /** Distinguish a failed canonical save from later bookkeeping failures. */
 export class TurnPersistenceError extends Error {
@@ -56,16 +68,16 @@ export class TurnPersistenceError extends Error {
  * Returns the stamped new messages (usage provenance reads them). Throws
  * TurnPersistenceError on failure so the runner can report it before DONE.
  */
-export function persistTurn(
+export async function persistTurn(
 	chatStore: ChatStore,
 	chatId: string,
 	baseCount: number,
 	turnMessages: readonly AgentMessage[],
 	isAborted: boolean,
-): LhMessage[] {
+): Promise<LhMessage[]> {
 	try {
-		const record = chatStore.getChat(chatId);
-		if (!record) throw new Error(`Chat not found: ${chatId}`);
+		const record = await chatStore.getChat(chatId);
+		if (!record || record.deleting) throw new Error(`Chat not found: ${chatId}`);
 		const stamped: LhMessage[] = [];
 		for (const m of turnMessages.slice(baseCount)) {
 			const message = m as LhMessage;
@@ -77,14 +89,14 @@ export function persistTurn(
 			) {
 				continue;
 			}
-			stamped.push(message.id ? message : ({ ...message, id: newMessageId() } as LhMessage));
+			stamped.push(message.id ? message : ({ ...message, id: messageId(m) } as LhMessage));
 		}
 		const tree = record.tree;
 		const blocks = planBlocksFor(record.messages, stamped, tree, [
 			...record.messages,
 			...stamped,
 		]);
-		chatStore.saveMessages(chatId, [...record.messages, ...stamped, ...blocks]);
+		await chatStore.appendMessages(chatId, [...stamped, ...blocks]);
 		return stamped;
 	} catch (err) {
 		console.error(`[chat ${chatId}] persist failed:`, err, { isAborted });
@@ -106,20 +118,21 @@ export function persistTurn(
  * trigger-agnostic. Skipped under tests: scripted chats are fixtures, not
  * knowledge (the pipeline itself is tested directly with mock models).
  */
-export function triggerExtraction(
+export async function triggerExtraction(
 	deps: { chatStore: ChatStore; graphStore: GraphStore },
 	extraction: ExtractionPipeline,
 	chatId: string,
 	chunkTokens: number,
-): void {
-	if (process.env.NODE_ENV === "test") return;
+): Promise<void> {
+	if (isStorageStopping() || process.env.NODE_ENV === "test") return;
 	try {
-		const record = deps.chatStore.getChat(chatId);
-		if (!record) return;
-		const covered = coverageOf(record.messages, deps.graphStore.readCoverage(), chatId, record.kind === "reading");
+		const record = await deps.chatStore.getChat(chatId);
+		if (!record || record.deleting || isStorageStopping()) return;
+		const covered = coverageOf(record.messages, await deps.graphStore.readCoverage(), chatId, record.kind === "reading");
 		// Reading also flushes short exchanges, so personal discoveries need
 		// not wait for an entire article to cross the usual teaching budget.
 		if (covered.uncoveredTokens === 0 || (record.kind !== "reading" && covered.uncoveredTokens < chunkTokens)) return;
+		if (isStorageStopping()) return;
 		void extraction.runExtraction(chatId).catch((err) => {
 			// BYOK (owner, 2026-09-22) + key presence (provider-key interlude,
 			// 2026-09-25): an unconfigured OR keyless write channel SKIPS (the

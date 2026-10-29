@@ -42,9 +42,9 @@ after(() => {
 
 /** A record whose newest assistant message carries a DANGLING quiz call —
  *  the settled state a mid-turn dismissal parks against. */
-function chatWithDanglingQuiz(id: string): string {
-	const chat = chatStore.createChat("park: dangling quiz");
-	chatStore.saveMessages(chat.id, [{
+async function chatWithDanglingQuiz(id: string): Promise<string> {
+	const chat = (await chatStore.createChat("park: dangling quiz"));
+	(await chatStore.saveMessages(chat.id, [{
 		id: newMessageId(),
 		role: "assistant",
 		content: [
@@ -56,14 +56,14 @@ function chatWithDanglingQuiz(id: string): string {
 				arguments: { question: "What is a cyclic group?" },
 			},
 		],
-	} as never]);
+	} as never]));
 	return chat.id;
 }
 
 /** A record with an ACTIVE problem — the settled practice state a
  *  dismiss-problem park applies against. */
-function chatWithActiveProblem(): string {
-	const chat = chatStore.createChat("park: active problem");
+async function chatWithActiveProblem(): Promise<string> {
+	const chat = (await chatStore.createChat("park: active problem"));
 	const assistant = {
 		id: newMessageId(),
 		role: "assistant",
@@ -76,7 +76,7 @@ function chatWithActiveProblem(): string {
 			},
 		],
 	} as never;
-	chatStore.saveMessages(chat.id, [assistant]);
+	(await chatStore.saveMessages(chat.id, [assistant]));
 	return chat.id;
 }
 
@@ -87,24 +87,24 @@ describe("the park registry", () => {
 		assert.equal(takeParkedDismissal("chat_x"), null);
 	});
 
-	it("apply with nothing parked is a no-op (no write, no emit)", () => {
-		const chat = chatWithDanglingQuiz("noop");
-		const before = chatStore.getChat(chat)!.messages.length;
+	it("apply with nothing parked is a no-op (no write, no emit)", async () => {
+		const chat = (await chatWithDanglingQuiz("noop"));
+		const before = (await chatStore.getChat(chat))!.messages.length;
 		let emitted = 0;
 		const off = subscribe((e) => {
 			if (e.type === "record-changed" && e.chatId === chat) emitted++;
 		});
-		applyParkedDismissal(chatStore, chat);
+		(await applyParkedDismissal(chatStore, chat));
 		off();
 		assert.equal(emitted, 0);
-		assert.equal(chatStore.getChat(chat)!.messages.length, before);
+		assert.equal((await chatStore.getChat(chat))!.messages.length, before);
 	});
 });
 
 describe("applyParkedDismissal — against real records", () => {
-	it("applies a parked question dismissal to the dangling quiz call", () => {
-		const chat = chatWithDanglingQuiz("apply-q");
-		const pending = danglingQuestionOf(chatStore.getChat(chat)!.messages);
+	it("applies a parked question dismissal to the dangling quiz call", async () => {
+		const chat = (await chatWithDanglingQuiz("apply-q"));
+		const pending = danglingQuestionOf((await chatStore.getChat(chat))!.messages);
 		assert.ok(pending);
 		parkDismissal(chat, {
 			type: "dismiss",
@@ -115,43 +115,43 @@ describe("applyParkedDismissal — against real records", () => {
 		const off = subscribe((e) => {
 			if (e.type === "record-changed" && e.chatId === chat) emitted++;
 		});
-		applyParkedDismissal(chatStore, chat);
+		(await applyParkedDismissal(chatStore, chat));
 		off();
 		assert.equal(emitted, 1);
 		// The call is answered now — nothing dangles.
-		assert.equal(danglingQuestionOf(chatStore.getChat(chat)!.messages), null);
-		assert.ok(answeredCallIds(chatStore.getChat(chat)!.messages).has(pending!.toolCallId));
+		assert.equal(danglingQuestionOf((await chatStore.getChat(chat))!.messages), null);
+		assert.ok(answeredCallIds((await chatStore.getChat(chat))!.messages).has(pending!.toolCallId));
 		assert.equal(takeParkedDismissal(chat), null);
 	});
 
-	it("applies a parked problem dismissal to the active problem", () => {
-		const chat = chatWithActiveProblem();
+	it("applies a parked problem dismissal to the active problem", async () => {
+		const chat = (await chatWithActiveProblem());
 		parkDismissal(chat, { type: "dismiss-problem", problemCallId: "call-prob-1" });
-		applyParkedDismissal(chatStore, chat);
+		(await applyParkedDismissal(chatStore, chat));
 		// The marker freed the slot — no active problem remains.
-		assert.equal(activeProblemOf(chatStore.getChat(chat)!.messages), null);
+		assert.equal(activeProblemOf((await chatStore.getChat(chat))!.messages), null);
 	});
 
-	it("drops a park that targets nothing (never materialized — silence)", () => {
-		const chat = chatWithDanglingQuiz("drop");
-		const before = chatStore.getChat(chat)!.messages.length;
+	it("drops a park that targets nothing (never materialized — silence)", async () => {
+		const chat = (await chatWithDanglingQuiz("drop"));
+		const before = (await chatStore.getChat(chat))!.messages.length;
 		parkDismissal(chat, { type: "dismiss-problem", problemCallId: "call-ghost" });
 		let emitted = 0;
 		const off = subscribe((e) => {
 			if (e.type === "record-changed" && e.chatId === chat) emitted++;
 		});
-		applyParkedDismissal(chatStore, chat);
+		(await applyParkedDismissal(chatStore, chat));
 		off();
 		assert.equal(emitted, 0);
-		assert.equal(chatStore.getChat(chat)!.messages.length, before);
+		assert.equal((await chatStore.getChat(chat))!.messages.length, before);
 		assert.equal(takeParkedDismissal(chat), null);
 	});
 });
 
 describe("the dismiss route — the park contract (202)", () => {
 	it("parks (202) while a turn runs; the settle apply lands the dismissal", async () => {
-		const chat = chatWithDanglingQuiz("route");
-		const pending = danglingQuestionOf(chatStore.getChat(chat)!.messages);
+		const chat = (await chatWithDanglingQuiz("route"));
+		const pending = danglingQuestionOf((await chatStore.getChat(chat))!.messages);
 		assert.ok(pending);
 		const dismissRoute = await import("../app/api/chats/[id]/dismiss/route.ts");
 
@@ -175,17 +175,17 @@ describe("the dismiss route — the park contract (202)", () => {
 		assert.equal(res.status, 202);
 		assert.deepEqual(await res.json(), { ok: true, parked: true });
 		// Nothing landed yet — the record still dangles (the turn owns it).
-		assert.ok(danglingQuestionOf(chatStore.getChat(chat)!.messages));
+		assert.ok(danglingQuestionOf((await chatStore.getChat(chat))!.messages));
 
 		// The settle: persistTurn (done) → applyParkedDismissal → endTurn.
-		applyParkedDismissal(chatStore, chat);
+		(await applyParkedDismissal(chatStore, chat));
 		endTurn(chat);
-		assert.equal(danglingQuestionOf(chatStore.getChat(chat)!.messages), null);
+		assert.equal(danglingQuestionOf((await chatStore.getChat(chat))!.messages), null);
 		assert.equal(takeParkedDismissal(chat), null);
 	});
 
 	it("still refuses honestly (400) with no turn and nothing dangling", async () => {
-		const chat = chatStore.createChat("park: nothing dangling").id;
+		const chat = (await chatStore.createChat("park: nothing dangling")).id;
 		const dismissRoute = await import("../app/api/chats/[id]/dismiss/route.ts");
 		const res = await dismissRoute.POST(
 			new Request(`http://test/api/chats/${chat}/dismiss`, {

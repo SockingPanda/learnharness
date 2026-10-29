@@ -33,12 +33,25 @@ import type { PiTurnHandle } from "./pi/ui-stream.ts";
 interface LhTurnRunsGlobal {
 	__lhTurnRuns?: Map<string, PiTurnHandle>;
 	__lhTurnFailures?: Map<string, string>;
+	__lhPendingTurnAborts?: Map<string, () => void>;
 }
 
 function runs(): Map<string, PiTurnHandle> {
 	const g = globalThis as typeof globalThis & LhTurnRunsGlobal;
 	return (g.__lhTurnRuns ??= new Map<string, PiTurnHandle>());
 }
+
+function pendingAborts(): Map<string, () => void> {
+	const host = globalThis as typeof globalThis & LhTurnRunsGlobal;
+	return host.__lhPendingTurnAborts ??= new Map<string, () => void>();
+}
+
+/** Cancel an admitted turn while its durable input is still being saved. */
+export function registerPendingTurnAbort(chatId: string, abort: () => void): void {
+	pendingAborts().set(chatId, abort);
+}
+
+export function unregisterPendingTurnAbort(chatId: string): void { pendingAborts().delete(chatId); }
 
 /** One small, transient notice per failed session. Never stores messages.
  * Cleared on the next accepted begin, session deletion, or process exit. */
@@ -62,11 +75,13 @@ export function clearTurnFailure(chatId: string): void {
 /** Register the chat's running turn (chat-handler, right after the turn
  *  starts). One per chat by construction — the 409 guard. */
 export function registerTurn(chatId: string, handle: PiTurnHandle): void {
+	pendingAborts().delete(chatId);
 	runs().set(chatId, handle);
 }
 
 /** Unregister at settle — chat-handler's onFinish, LAST (after endTurn). */
 export function unregisterTurn(chatId: string): void {
+	pendingAborts().delete(chatId);
 	runs().delete(chatId);
 }
 
@@ -81,8 +96,11 @@ export function runningTurn(chatId: string): PiTurnHandle | undefined {
  *  honest 409 — there was nothing to abort, the caller refetches. */
 export function abortTurn(chatId: string): { ok: true } | { ok: false; reason: "not_running" } {
 	const handle = runs().get(chatId);
-	if (!handle) return { ok: false, reason: "not_running" };
-	handle.abort();
+	if (!handle) {
+		const abort = pendingAborts().get(chatId);
+		if (!abort) return { ok: false, reason: "not_running" };
+		abort();
+	} else handle.abort();
 	return { ok: true };
 }
 

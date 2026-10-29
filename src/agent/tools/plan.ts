@@ -73,7 +73,7 @@ export function planTools(ctx: PlanToolContext): Record<string, AgentTool<any>> 
 			parameters: planInitInput,
 			execute: serverExecute("plan_init", planInitInput, async ({ mermaid }) => {
 				const { chatId, chatStore } = ctx;
-				const record = chatStore.getChat(chatId);
+				const record = await chatStore.getChat(chatId);
 				if (!record) return { ok: false, error: `Chat not found: ${chatId}` };
 
 				const parsed = parseMermaidPlan(mermaid);
@@ -87,7 +87,7 @@ export function planTools(ctx: PlanToolContext): Record<string, AgentTool<any>> 
 					// createTree validates the structure (duplicate ids, missing
 					// edge endpoints, self-loops, cycles → PlanTreeError).
 					const next = createTree(parsed.plan.nodes, parsed.plan.edges);
-					chatStore.saveTree(chatId, next);
+					await chatStore.saveTree(chatId, next);
 					// Context diet: content = the validated nodeIds + the reminder (the
 				// ids just became binding for every quiz/explain call); details =
 					// the full tree for the record/UI — the plan popup's latestTree

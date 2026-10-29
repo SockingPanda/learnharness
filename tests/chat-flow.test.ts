@@ -176,16 +176,12 @@ async function drainRunning(chatId: string): Promise<string> {
 	return new Response(handle.subscribe()).text();
 }
 
-function waitFor(cond: () => boolean, timeoutMs = 8000, what = "condition"): Promise<void> {
-	return new Promise((resolve, reject) => {
-		const started = Date.now();
-		const tick = () => {
-			if (cond()) return resolve();
-			if (Date.now() - started > timeoutMs) return reject(new Error(`timeout waiting for ${what}`));
-			setTimeout(tick, 25);
-		};
-		tick();
-	});
+async function waitFor(cond: () => boolean | Promise<boolean>, timeoutMs = 8000, what = "condition"): Promise<void> {
+	const started = Date.now();
+	while (!(await cond())) {
+		if (Date.now() - started > timeoutMs) throw new Error(`timeout waiting for ${what}`);
+		await new Promise<void>((resolve) => setTimeout(resolve, 25));
+	}
 }
 
 /** A teacher whose step 1 blocks on an external gate — a turn held mid-run
@@ -245,12 +241,12 @@ function dismissPost(chatId: string, toolCallId: string, kind: "quiz" | "ask" | 
  *  conversation model before any turn streams. The scripted tests give
  *  each chat a per-chat pin exactly like the setup flow does in
  *  production (the injected faux engine still runs the loop). */
-function createConfiguredChat(title: string) {
-	const chat = chatStore.createChat(title);
-	chatStore.saveSettings(chat.id, { model: { provider: "openrouter", id: "z-ai/glm-5.3-flash" } });
+async function createConfiguredChat(title: string) {
+	const chat = (await chatStore.createChat(title));
+	(await chatStore.saveSettings(chat.id, { model: { provider: "openrouter", id: "z-ai/glm-5.3-flash" } }));
 	// nodeId is required on teach quizzes (owner ruling 2026-09-26) — the
 	// scripted lessons quiz against this seeded tree.
-	chatStore.saveTree(chat.id, {
+	(await chatStore.saveTree(chat.id, {
 		nodes: [
 			{ id: "planet-order", title: "Planet order" },
 			{ id: "genealogy", title: "Genealogy of religion" },
@@ -259,7 +255,7 @@ function createConfiguredChat(title: string) {
 		],
 		edges: [],
 		version: 1,
-	});
+	}));
 	return chat;
 }
 
@@ -277,13 +273,13 @@ after(() => {
 describe("teacher chat flow (scripted model)", () => {
 	it("quiz tool call persists as a pending part; the answer continues the lesson", async () => {
 		const { engine, calls } = scriptedTeacher(defaultLesson);
-		const chat = createConfiguredChat("Test: solar system");
+		const chat = (await createConfiguredChat("Test: solar system"));
 		createdChats.push(chat.id);
 
 		// ── Turn 1: learner opens with a topic; teacher probes with a quiz ──
 		await drainTurn(post(chat.id, { type: "text", text: "teach me the solar system" }), agentFactory(engine));
 
-		const saved1 = chatStore.getChat(chat.id)!;
+		const saved1 = (await chatStore.getChat(chat.id))!;
 		// Native record: user + assistant (fork 1 — the clean question's
 		// placeholder result never persists, so the record ends at the call).
 		assert.equal(saved1.messages.length, 2, "user message + assistant response persisted");
@@ -325,7 +321,7 @@ describe("teacher chat flow (scripted model)", () => {
 		// SAME assistant view message as the answered quiz (the native
 		// grouping canon: consecutive assistant/toolResult messages bounded
 		// by user messages form one group). ──
-		const saved2 = chatStore.getChat(chat.id)!;
+		const saved2 = (await chatStore.getChat(chat.id))!;
 		// Native: user, assistant, answer toolResult, reaction assistant.
 		assert.equal(saved2.messages.length, 4, "the answer + reaction append natively");
 		assert.equal((saved2.messages[2] as { role?: string }).role, "toolResult", "the graded answer is the call's tool result");
@@ -360,7 +356,7 @@ describe("teacher chat flow (scripted model)", () => {
 	});
 
 	it("refuses malformed inputs with a clean 400 — no liveness effects, no lockout", async () => {
-		const chat = createConfiguredChat("Test: malformed input");
+		const chat = (await createConfiguredChat("Test: malformed input"));
 		createdChats.push(chat.id);
 
 		// A text event with no text: refused at the parse boundary.
@@ -394,7 +390,7 @@ describe("teacher chat flow (scripted model)", () => {
 		// passthrough ever stopped emitting one of these, the indicator or
 		// the dock would silently die.
 		const { engine } = scriptedTeacher(defaultLesson);
-		const chat = createConfiguredChat("Test: protocol pin");
+		const chat = (await createConfiguredChat("Test: protocol pin"));
 		createdChats.push(chat.id);
 		const body = await drainTurn(post(chat.id, { type: "text", text: "quiz me" }), agentFactory(engine));
 		const events = eventsOf(body);
@@ -418,7 +414,7 @@ describe("teacher chat flow (scripted model)", () => {
 		// was invisible — the marker persisted TWICE with the same id, two
 		// view messages shared one React key, and the client crashed (live,
 		// 2026-09-26: steer_job_muhlokbf_84e9373c in chat_muhlcltz).
-		const chat = createConfiguredChat("Test: wake single-copy");
+		const chat = (await createConfiguredChat("Test: wake single-copy"));
 		createdChats.push(chat.id);
 		// Seed a plain-text turn (no dangling question — waitForIdle must pass).
 		const seed = scriptedTeacher(() => [() => fauxAssistantMessage([fauxText("On it — dispatched the researcher.")])]);
@@ -438,7 +434,7 @@ describe("teacher chat flow (scripted model)", () => {
 		// store (details.jobId indexes it); a synthetic id with no record
 		// yields "" and the pump silently no-ops (the hang this test taught
 		// us about on first contact).
-		const job = jobStore.createJob({ kind: "research", chatId: chat.id, toolCallId: "call-1" });
+		const job = (await jobStore.createJob({ kind: "research", chatId: chat.id, toolCallId: "call-1" }));
 		const steer = buildSubagentSteer(
 			job,
 			{ brief: "The Mercury answer, with sources.", sources: [{ title: "NASA", url: "https://nasa.gov" }] },
@@ -448,13 +444,13 @@ describe("teacher chat flow (scripted model)", () => {
 		// persist is imminent but the TURN is still running). The record
 		// assertion therefore waits for the wake response to land.
 		await deliverJobResult(steer); // queue + pump → waitForIdle → the wake turn
-		await waitFor(() => {
-			const rec = chatStore.getChat(chat.id);
+		await waitFor(async () => {
+			const rec = (await chatStore.getChat(chat.id));
 			const at = rec?.messages.findIndex((m) => (m as { id?: string }).id === steer.id) ?? -1;
 			return at !== -1 && (rec!.messages[at + 1] as { role?: string } | undefined)?.role === "assistant";
 		}, 8000, "the wake turn to persist (marker + response)");
 
-		const record = chatStore.getChat(chat.id)!;
+		const record = (await chatStore.getChat(chat.id))!;
 		const copies = record.messages.filter((m) => (m as { id?: string }).id === steer.id);
 		assert.equal(copies.length, 1, "exactly ONE copy of the steer marker (the carried filter)");
 		const at = record.messages.findIndex((m) => (m as { id?: string }).id === steer.id);
@@ -469,7 +465,7 @@ describe("teacher chat flow (scripted model)", () => {
 		// (after a completed assistant message AND its tool results). Waiting
 		// for run end (follow-ups) can never fire mid-lesson: the question
 		// stopper pre-empts that poll at exactly the moments a run DOES end.
-		const chat = createConfiguredChat("Test: mid-run steering");
+		const chat = (await createConfiguredChat("Test: mid-run steering"));
 		createdChats.push(chat.id);
 
 		// Step 1 (gated): a non-question tool — an unknown name yields an
@@ -497,7 +493,7 @@ describe("teacher chat flow (scripted model)", () => {
 				// message_end already fired, so the job must be flipped
 				// done NOW (dock fix, owner 2026-09-26) — not at this
 				// turn's settle.
-				jobFlippedMidTurn = jobStore.getJob(jobIdMid)?.status;
+				jobFlippedMidTurn = (await jobStore.getJob(jobIdMid))?.status;
 				await gate2;
 				return fauxAssistantMessage([fauxText("Folded the marker in.")]);
 			},
@@ -519,10 +515,10 @@ describe("teacher chat flow (scripted model)", () => {
 		// The result lands MID-RUN: the pump hands it to the live agent's
 		// steering queue (vehicle 1) — the queued marker waits for the
 		// in-flight turn to complete so the injection lands at its boundary.
-		const job = jobStore.createJob({ kind: "research", chatId: chat.id, toolCallId: "call-mid" });
+		const job = (await jobStore.createJob({ kind: "research", chatId: chat.id, toolCallId: "call-mid" }));
 		jobIdMid = job.id;
 		// The runner stores the result BEFORE delivery (finalizeJob reads it).
-		jobStore.updateJob(job.id, { status: "done", result: { brief: "Mid-run brief.", sources: [] }, delivery: { kind: "result", status: "pending" } });
+		(await jobStore.updateJob(job.id, { status: "done", result: { brief: "Mid-run brief.", sources: [] }, delivery: { kind: "result", status: "pending" } }));
 		const steer = buildSubagentSteer(job, { brief: "Mid-run brief.", sources: [] });
 		const delivery = deliverJobResult(steer);
 		await new Promise((r) => setTimeout(r, 300)); // vehicle 1 hands off
@@ -538,7 +534,7 @@ describe("teacher chat flow (scripted model)", () => {
 
 		// Record shape: the marker sits BETWEEN completed turn units — after
 		// the toolResult it must never split, adjacent to it.
-		const record = chatStore.getChat(chat.id)!;
+		const record = (await chatStore.getChat(chat.id))!;
 		const at = (role: string, pred: (m: LhMessage) => boolean) =>
 			record.messages.findIndex((m) => (m as { role?: string }).role === role && pred(m as never));
 		const callAt = record.messages.findIndex(
@@ -627,7 +623,7 @@ describe("teacher chat flow (scripted model)", () => {
 		let release!: () => void;
 		const gate = new Promise<void>((r) => (release = r));
 		const engine = gatedTeacher(gate);
-		const chat = createConfiguredChat("Test: view cancel");
+		const chat = (await createConfiguredChat("Test: view cancel"));
 		createdChats.push(chat.id);
 
 		const res = await handleChatRequest(post(chat.id, { type: "text", text: "hold my turn" }), agentFactory(engine));
@@ -646,7 +642,7 @@ describe("teacher chat flow (scripted model)", () => {
 		// It runs to FULL completion with nobody watching, then settles alone.
 		release();
 		await waitFor(() => !isTurnRunning(chat.id), 8000, "turn settle after view cancel");
-		const saved = chatStore.getChat(chat.id)!;
+		const saved = (await chatStore.getChat(chat.id))!;
 		assert.equal(saved.messages.length, 2, "complete turn persisted — not a partial");
 		assert.equal(runningTurn(chat.id), undefined, "handle unregistered at settle");
 	});
@@ -685,7 +681,7 @@ describe("teacher chat flow (scripted model)", () => {
 		];
 		const { engine, calls } = scriptedTeacher(steps);
 
-		const chat = createConfiguredChat("Test: bad quiz retry");
+		const chat = (await createConfiguredChat("Test: bad quiz retry"));
 		createdChats.push(chat.id);
 		const body = await drainTurn(post(chat.id, { type: "text", text: "quiz me" }), agentFactory(engine));
 
@@ -713,7 +709,7 @@ describe("teacher chat flow (scripted model)", () => {
 		// The transcript: the failed call persisted as an ERROR RESULT (the
 		// model's retry context — errored question calls DO persist), the
 		// retry as the dangling quiz. The projection renders the error part.
-		const saved = chatStore.getChat(chat.id)!;
+		const saved = (await chatStore.getChat(chat.id))!;
 		const view = projectView(saved.messages);
 		const quizParts = view[1]!.parts.filter((p) => p.type === "tool-quiz");
 		const failed = quizParts.find(
@@ -753,7 +749,7 @@ describe("teacher chat flow (scripted model)", () => {
 		];
 		const { engine } = scriptedTeacher(() => steps);
 
-		const chat = createConfiguredChat("Test: string options");
+		const chat = (await createConfiguredChat("Test: string options"));
 		createdChats.push(chat.id);
 		const body = await drainTurn(post(chat.id, { type: "text", text: "quiz me" }), agentFactory(engine));
 
@@ -763,7 +759,7 @@ describe("teacher chat flow (scripted model)", () => {
 		assert.equal(stringyEnd.isError, true, "the structural reject surfaced as an error execution");
 		assert.match(String(stringyEnd.result?.content?.[0]?.text ?? ""), /options/);
 
-		const saved = chatStore.getChat(chat.id)!;
+		const saved = (await chatStore.getChat(chat.id))!;
 		const view = projectView(saved.messages);
 		const failed = view[1]!.parts.find(
 				(p) => (p as { toolCallId?: string }).toolCallId === "call-stringy",
@@ -792,7 +788,7 @@ describe("teacher chat flow (scripted model)", () => {
 			),
 		]);
 
-		const chat = createConfiguredChat("Test: parallel quizzes");
+		const chat = (await createConfiguredChat("Test: parallel quizzes"));
 		createdChats.push(chat.id);
 		const body = await drainTurn(post(chat.id, { type: "text", text: "quiz me twice" }), agentFactory(engine));
 
@@ -806,7 +802,7 @@ describe("teacher chat flow (scripted model)", () => {
 		assert.ok(endA < endB, "call A's end precedes call B's (sequential execution)");
 
 		// Saved in call order (the projection preserves the content order).
-		const saved = chatStore.getChat(chat.id)!;
+		const saved = (await chatStore.getChat(chat.id))!;
 		const quizIds = projectView(saved.messages)[1]!.parts
 			.filter((p) => p.type === "tool-quiz")
 			.map((p) => (p as { toolCallId: string }).toolCallId);
@@ -825,39 +821,39 @@ describe("teacher chat flow (scripted model)", () => {
 
 describe("chat store", () => {
 	it("round-trips and lists chats", async () => {
-		const chat = chatStore.createChat("Store test");
+		const chat = (await chatStore.createChat("Store test"));
 		createdChats.push(chat.id);
-		chatStore.saveMessages(chat.id, [{ id: "m1", role: "user", content: "hi", timestamp: 1 } as never]);
-		const loaded = chatStore.getChat(chat.id)!;
+		(await chatStore.saveMessages(chat.id, [{ id: "m1", role: "user", content: "hi", timestamp: 1 } as never]));
+		const loaded = (await chatStore.getChat(chat.id))!;
 		assert.equal(loaded.messages.length, 1);
 		assert.equal(loaded.title, "Store test");
 	});
 
 	it("persist the per-chat model settings (replace-whole, no updatedAt churn)", async () => {
-		const chat = chatStore.createChat("Settings test");
+		const chat = (await chatStore.createChat("Settings test"));
 		createdChats.push(chat.id);
-		const before = chatStore.getChat(chat.id)!.updatedAt;
-		chatStore.saveSettings(chat.id, { model: { provider: "openrouter", id: "z-ai/glm-5.3-flash" }, thinkingLevel: "high" });
-		const saved = chatStore.getChat(chat.id)!;
+		const before = (await chatStore.getChat(chat.id))!.updatedAt;
+		(await chatStore.saveSettings(chat.id, { model: { provider: "openrouter", id: "z-ai/glm-5.3-flash" }, thinkingLevel: "high" }));
+		const saved = (await chatStore.getChat(chat.id))!;
 		assert.deepEqual(saved.settings, { model: { provider: "openrouter", id: "z-ai/glm-5.3-flash" }, thinkingLevel: "high" });
 		assert.equal(saved.updatedAt, before, "a picker write is not conversation activity");
 		// replace-whole: a settings-less write clears the override (an empty
 		// object persists — every field absent = config defaults)
-		chatStore.saveSettings(chat.id, {});
-		assert.deepEqual(chatStore.getChat(chat.id)!.settings, {});
+		(await chatStore.saveSettings(chat.id, {}));
+		assert.deepEqual((await chatStore.getChat(chat.id))!.settings, {});
 	});
 });
 
 describe("canonical persistence failures", () => {
 	it("refuses a failed input save without building an agent or leaving a live turn", async () => {
 		const { engine } = scriptedTeacher(defaultLesson);
-		const chat = createConfiguredChat("Test: failed answer write-ahead");
+		const chat = (await createConfiguredChat("Test: failed answer write-ahead"));
 		createdChats.push(chat.id);
 		await drainTurn(post(chat.id, { type: "text", text: "quiz me" }), agentFactory(engine));
-		const before = chatStore.getChat(chat.id)!.messages;
-		const save = chatStore.saveMessages;
+		const before = (await chatStore.getChat(chat.id))!.messages;
+		const save = chatStore.appendMessages;
 		let builds = 0;
-		chatStore.saveMessages = () => { throw new Error("synthetic write-ahead failure"); };
+		chatStore.appendMessages = () => { throw new Error("synthetic write-ahead failure"); };
 		try {
 			const res = await handleChatRequest(post(chat.id, { type: "answer", toolCallId: "call-1", answer: gradedAnswer(QUIZ_INPUT, ["Mercury"]) }), (opts) => {
 				builds++;
@@ -873,18 +869,18 @@ describe("canonical persistence failures", () => {
 			assert.equal(builds, 0);
 			assert.equal(isTurnRunning(chat.id), false);
 			assert.equal(runningTurn(chat.id), undefined);
-			assert.deepEqual(chatStore.getChat(chat.id)!.messages, before);
-		} finally { chatStore.saveMessages = save; }
+			assert.deepEqual((await chatStore.getChat(chat.id))!.messages, before);
+		} finally { chatStore.appendMessages = save; }
 	});
 
 	it("reports a failed reply save before DONE while keeping the accepted answer durable", async () => {
 		const { engine } = scriptedTeacher(defaultLesson);
-		const chat = createConfiguredChat("Test: failed reply persistence");
+		const chat = (await createConfiguredChat("Test: failed reply persistence"));
 		createdChats.push(chat.id);
 		await drainTurn(post(chat.id, { type: "text", text: "quiz me" }), agentFactory(engine));
-		const save = chatStore.saveMessages;
+		const save = chatStore.appendMessages;
 		let writes = 0;
-		chatStore.saveMessages = (id, messages) => {
+		chatStore.appendMessages = (id, messages) => {
 			if (++writes === 2) throw new Error("synthetic reply save failure");
 			return save(id, messages);
 		};
@@ -896,7 +892,7 @@ describe("canonical persistence failures", () => {
 			assert.ok(body.indexOf("The reply could not be saved.") < body.indexOf("[DONE]"));
 			assert.equal(isTurnRunning(chat.id), false);
 			assert.equal(runningTurn(chat.id), undefined);
-			assert.equal(chatStore.getChat(chat.id)!.messages.at(-1)?.role, "toolResult");
+			assert.equal((await chatStore.getChat(chat.id))!.messages.at(-1)?.role, "toolResult");
 			// The normal submitter may not reach GET /stream until AFTER the
 			// failing turn has left the live registry. It must still see it.
 			const late = await streamRoute.GET(new Request("http://test/stream"), { params: Promise.resolve({ id: chat.id }) });
@@ -914,12 +910,12 @@ describe("canonical persistence failures", () => {
 			await missedView.continueIfOwed(snapshot.messages);
 			assert.equal(automaticPosts, 0, "the record notice must block replacement even without a stream attachment");
 			assert.equal(missedView.getState().error?.message, "The reply could not be saved.");
-		} finally { chatStore.saveMessages = save; }
+		} finally { chatStore.appendMessages = save; }
 	});
 
 	it("does not redeliver a persisted learner steer after usage bookkeeping fails", async () => {
 		const { engine } = scriptedTeacher(() => [() => fauxAssistantMessage([fauxText("Synthetic response")])]);
-		const chat = createConfiguredChat("Test: post-save bookkeeping failure");
+		const chat = (await createConfiguredChat("Test: post-save bookkeeping failure"));
 		createdChats.push(chat.id);
 		const steer = newUserMessage("Synthetic learner steer");
 		const appendUsage = chatStore.appendTurnUsage;
@@ -933,10 +929,10 @@ describe("canonical persistence failures", () => {
 				return agent;
 			});
 			assert.equal(eventsOf(body).find(e => e.type === "error")?.errorText, "An error occurred.");
-			assert.ok(chatStore.getChat(chat.id)!.messages.some(m => m.id === steer.id), "the steer was saved before bookkeeping failed");
+			assert.ok((await chatStore.getChat(chat.id))!.messages.some(m => m.id === steer.id), "the steer was saved before bookkeeping failed");
 			const delivered: LhMessage[] = [];
 			const next = { steer: (message: LhMessage) => delivered.push(message), state: { model: { provider: "faux" } } } as unknown as Parameters<typeof registerLiveAgent>[1];
-			registerLiveAgent(chat.id, next);
+			(await registerLiveAgent(chat.id, next));
 			assert.deepEqual(delivered, [], "an already-saved learner steer must not reach another agent");
 		} finally {
 			chatStore.appendTurnUsage = appendUsage;
@@ -948,7 +944,7 @@ describe("canonical persistence failures", () => {
 describe("mid-turn navigation (turn liveness + write-ahead)", () => {
 	it("one turn per chat: a concurrent request is 409'd; the next one after finish is accepted", async () => {
 		const { engine } = scriptedTeacher(defaultLesson);
-		const chat = createConfiguredChat("Test: turn guard");
+		const chat = (await createConfiguredChat("Test: turn guard"));
 		createdChats.push(chat.id);
 
 		const res1 = await handleChatRequest(post(chat.id, { type: "text", text: "teach me the solar system" }), agentFactory(engine)); // acked; the turn runs as a background object (Diet B: no stream to hold)
@@ -969,7 +965,7 @@ describe("mid-turn navigation (turn liveness + write-ahead)", () => {
 
 	it("write-ahead: the learner's answer is durable BEFORE the turn finishes", async () => {
 		const { engine } = scriptedTeacher(defaultLesson);
-		const chat = createConfiguredChat("Test: write-ahead");
+		const chat = (await createConfiguredChat("Test: write-ahead"));
 		createdChats.push(chat.id);
 
 		// Turn 1: the teacher asks the quiz (dangling call in the record).
@@ -982,14 +978,14 @@ describe("mid-turn navigation (turn liveness + write-ahead)", () => {
 		// on disk — a remount (or crash) mid-turn sees the answered quiz, never
 		// the stale pre-answer question.
 		const res = await handleChatRequest(post(chat.id, { type: "answer", toolCallId: "call-1", answer }), agentFactory(engine));
-		const midTurn = chatStore.getChat(chat.id)!;		assert.equal(midTurn.messages.length, 3, "write-ahead appended the answer tool result before finish");
+		const midTurn = (await chatStore.getChat(chat.id))!;		assert.equal(midTurn.messages.length, 3, "write-ahead appended the answer tool result before finish");
 		assert.equal((midTurn.messages[2] as { role?: string }).role, "toolResult");
 		const midQuiz = projectView(midTurn.messages)[1]!.parts.find((p) => p.type === "tool-quiz");
 		assert.ok(midQuiz && midQuiz.type === "tool-quiz");
 		assert.equal((midQuiz as { state?: string }).state, "output-available", "write-ahead persisted the answer before finish");
 
 		await drainRunning(chat.id); // finish → persist the full turn → endTurn
-		const saved2 = chatStore.getChat(chat.id)!;
+		const saved2 = (await chatStore.getChat(chat.id))!;
 		// Native: user, assistant, answer result, reaction — one append-only
 		// history; the projection still renders ONE assistant group.
 		assert.equal(saved2.messages.length, 4, "full turn persisted as usual at finish");
@@ -999,36 +995,36 @@ describe("mid-turn navigation (turn liveness + write-ahead)", () => {
 });
 
 describe("renameChat (the header's click-to-edit title)", () => {
-	it("persists the title and does NOT bump updatedAt — sidebar order must not churn", () => {
-		const chat = chatStore.createChat("old title");
+	it("persists the title and does NOT bump updatedAt — sidebar order must not churn", async () => {
+		const chat = (await chatStore.createChat("old title"));
 		createdChats.push(chat.id);
-		const before = chatStore.getChat(chat.id)!.updatedAt;
-		const renamed = chatStore.renameChat(chat.id, "  new title  ");
+		const before = (await chatStore.getChat(chat.id))!.updatedAt;
+		const renamed = (await chatStore.renameChat(chat.id, "  new title  "));
 		assert.equal(renamed.title, "new title", "trimmed on the way in");
-		assert.equal(chatStore.getChat(chat.id)!.title, "new title");
+		assert.equal((await chatStore.getChat(chat.id))!.title, "new title");
 		assert.equal(
-			chatStore.getChat(chat.id)!.updatedAt,
+			(await chatStore.getChat(chat.id))!.updatedAt,
 			before,
 			"a rename is not conversation activity",
 		);
 		assert.equal(
-			chatStore.listChats().find((c) => c.id === chat.id)!.title,
+			(await chatStore.listChats()).find((c) => c.id === chat.id)!.title,
 			"new title",
 			"the sidebar list view sees it",
 		);
 	});
 
-	it("falls back to Untitled session on an all-whitespace title (the honest floor)", () => {
-		const chat = chatStore.createChat("keep me");
+	it("falls back to Untitled session on an all-whitespace title (the honest floor)", async () => {
+		const chat = (await chatStore.createChat("keep me"));
 		createdChats.push(chat.id);
-		const renamed = chatStore.renameChat(chat.id, "   ");
+		const renamed = (await chatStore.renameChat(chat.id, "   "));
 		assert.equal(renamed.title, "Untitled session");
 	});
 });
 
 describe("the BYOK turn gate (no factory floor — owner, 2026-09-22)", () => {
 	it("a chat with no model refuses the turn with the 503 envelope — nothing lingers", async () => {
-		const chat = chatStore.createChat("Test: unconfigured chat");
+		const chat = (await chatStore.createChat("Test: unconfigured chat"));
 		createdChats.push(chat.id);
 
 		// The record's strong slot belongs to settings-store.test.ts (the
@@ -1053,13 +1049,13 @@ describe("the BYOK turn gate (no factory floor — owner, 2026-09-22)", () => {
 		// Either way: no phantom liveness, nothing durable from a refused turn.
 		if (expectRefusal) {
 			assert.equal(isTurnRunning(chat.id), false, "the refusal never registers a live turn");
-			const saved = chatStore.getChat(chat.id)!;
+			const saved = (await chatStore.getChat(chat.id))!;
 			assert.equal(saved.messages.length, 0, "no write-ahead persist before the gate");
 		}
 	});
 
 	it("a per-chat model alone opens the gate (the setup flow's exact write)", async () => {
-		const chat = createConfiguredChat("Test: per-chat pin only");
+		const chat = (await createConfiguredChat("Test: per-chat pin only"));
 		createdChats.push(chat.id);
 		const res = await handleChatRequest(post(chat.id, { type: "text", text: "teach me the solar system" }), agentFactory(scriptedTeacher(defaultLesson).engine));
 		assert.equal(res.status, 200, "chat.settings.model satisfies the chain without any record slot");
@@ -1074,7 +1070,7 @@ describe("the key-presence turn gate (provider-key interlude, 2026-09-25)", () =
 	// WHOLE truth (the throwaway data dir has no auth.json), so each test
 	// pins its provider's env var explicitly and restores it after.
 	it("a pinned provider whose key is gone refuses with 503 provider_key_missing — nothing lingers", async () => {
-		const chat = chatStore.createChat("Test: keyless provider");
+		const chat = (await chatStore.createChat("Test: keyless provider"));
 		createdChats.push(chat.id);
 		const saved = process.env.TOGETHER_API_KEY;
 		delete process.env.TOGETHER_API_KEY;
@@ -1082,7 +1078,7 @@ describe("the key-presence turn gate (provider-key interlude, 2026-09-25)", () =
 			// The chat's own model override pins the provider — the same
 			// chain the strong slot rides. The gate fires BEFORE the engine
 			// build, so the fake model id never hits the catalog.
-			chatStore.saveSettings(chat.id, { model: { provider: "together", id: "no-such-model" } });
+			(await chatStore.saveSettings(chat.id, { model: { provider: "together", id: "no-such-model" } }));
 			const res = await handleChatRequest(post(chat.id, { type: "text", text: "teach me something" }), agentFactory(scriptedTeacher(defaultLesson).engine));
 
 			assert.equal(res.status, 503, "the key-presence gate refuses before beginTurn");
@@ -1092,21 +1088,21 @@ describe("the key-presence turn gate (provider-key interlude, 2026-09-25)", () =
 			assert.deepEqual(body.slots, ["strong"], "the conversation tier is the affected slot");
 			assert.equal(body.error, "No Together key is set — add one in Settings → Keys", "the human line names the provider");
 			assert.equal(isTurnRunning(chat.id), false, "the refusal never registers a live turn");
-			assert.equal(chatStore.getChat(chat.id)!.messages.length, 0, "no write-ahead persist before the gate");
+			assert.equal((await chatStore.getChat(chat.id))!.messages.length, 0, "no write-ahead persist before the gate");
 		} finally {
 			if (saved !== undefined) process.env.TOGETHER_API_KEY = saved;
 		}
 	});
 
 	it("an env-present key passes the gate (gate by what would run)", async () => {
-		const chat = chatStore.createChat("Test: env-keyed provider");
+		const chat = (await chatStore.createChat("Test: env-keyed provider"));
 		createdChats.push(chat.id);
 		const saved = process.env.OPENAI_API_KEY;
 		process.env.OPENAI_API_KEY = "test-key-presence-gate";
 		try {
 			// A REAL catalog model: the engine build AFTER the gate must
 			// resolve — the injected agent replaces the loop, not the build.
-			chatStore.saveSettings(chat.id, { model: { provider: "openai", id: "gpt-4" } });
+			(await chatStore.saveSettings(chat.id, { model: { provider: "openai", id: "gpt-4" } }));
 			const res = await handleChatRequest(post(chat.id, { type: "text", text: "teach me something" }), agentFactory(scriptedTeacher(defaultLesson).engine));
 
 			assert.equal(res.status, 200, "the env-shadowed key counts as present — the turn runs");
@@ -1123,7 +1119,7 @@ describe("background-turn runner (owner ruling 2026-09-25: every turn is a serve
 		let release!: () => void;
 		const gate = new Promise<void>((r) => (release = r));
 		const engine = gatedTeacher(gate);
-		const chat = createConfiguredChat("Test: ack-and-close");
+		const chat = (await createConfiguredChat("Test: ack-and-close"));
 		createdChats.push(chat.id);
 
 		const res = await handleChatRequest(post(chat.id, { type: "text", text: "hold it" }), agentFactory(engine));
@@ -1144,7 +1140,7 @@ describe("background-turn runner (owner ruling 2026-09-25: every turn is a serve
 		let release!: () => void;
 		const gate = new Promise<void>((r) => (release = r));
 		const engine = gatedTeacher(gate);
-		const chat = createConfiguredChat("Test: reattach replay");
+		const chat = (await createConfiguredChat("Test: reattach replay"));
 		createdChats.push(chat.id);
 
 		const ack = await handleChatRequest(post(chat.id, { type: "text", text: "hold my turn" }), agentFactory(engine));
@@ -1199,7 +1195,7 @@ describe("background-turn runner (owner ruling 2026-09-25: every turn is a serve
 		const faux = createFauxCore({});
 		faux.setResponses([fauxAssistantMessage([fauxText(long)])]);
 		const engine: PiEngine = { model: faux.getModel(), streamFn: faux.streamSimple };
-		const chat = createConfiguredChat("Test: compaction law");
+		const chat = (await createConfiguredChat("Test: compaction law"));
 		createdChats.push(chat.id);
 		const body = await drainTurn(post(chat.id, { type: "text", text: "go" }), agentFactory(engine));
 		const events = eventsOf(body);
@@ -1214,13 +1210,13 @@ describe("background-turn runner (owner ruling 2026-09-25: every turn is a serve
 		assert.ok(end, "message_end present");
 		assert.ok(JSON.stringify((end as { message?: { content?: unknown[] } }).message?.content ?? []).includes(long), "message_end carries the full final message (authoritative, lossless)");
 		// And the persisted record never knew about chunks at all.
-		const record = chatStore.getChat(chat.id)!;
+		const record = (await chatStore.getChat(chat.id))!;
 		assert.ok(JSON.stringify(record.messages).includes(long), "persistTurn wrote the settled message in full");
 	});
 
 	it("remote abort: any client can stop a running turn; the partial persists; subscribers close cleanly", async () => {
 		const engine = abortableTeacher();
-		const chat = createConfiguredChat("Test: remote abort");
+		const chat = (await createConfiguredChat("Test: remote abort"));
 		createdChats.push(chat.id);
 
 		const res = await handleChatRequest(post(chat.id, { type: "text", text: "wait forever" }), agentFactory(engine));
@@ -1236,7 +1232,7 @@ describe("background-turn runner (owner ruling 2026-09-25: every turn is a serve
 		assert.ok(text.endsWith("data: [DONE]\n\n"), "subscriber closes cleanly at the aborted settle");
 
 		await waitFor(() => !isTurnRunning(chat.id), 8000, "aborted turn settle");
-		const saved = chatStore.getChat(chat.id)!;
+		const saved = (await chatStore.getChat(chat.id))!;
 		assert.ok(saved.messages.length >= 2, "the partial transcript persisted via the usual settle path");
 		assert.equal(runningTurn(chat.id), undefined, "handle unregistered after the aborted settle");
 
@@ -1246,7 +1242,7 @@ describe("background-turn runner (owner ruling 2026-09-25: every turn is a serve
 
 	it("subscribe after settle: the cheap terminal tells the client the record is current", async () => {
 		const { engine } = scriptedTeacher(defaultLesson);
-		const chat = createConfiguredChat("Test: settled terminal");
+		const chat = (await createConfiguredChat("Test: settled terminal"));
 		createdChats.push(chat.id);
 
 		// A quiet chat: no turn ever ran — the stream is the same terminal.
@@ -1262,13 +1258,13 @@ describe("background-turn runner (owner ruling 2026-09-25: every turn is a serve
 
 	it("concurrent two-chat reattach: two turns in flight, two views, both settle independently", async () => {
 		const releaseFns: Array<() => void> = [];
-		const chats = [1, 2].map((n) => {
+		const chats = await Promise.all([1, 2].map(async (n) => {
 			const gate = new Promise<void>((r) => (releaseFns.push(r)));
 			const engine = gatedTeacher(gate);
-			const chat = createConfiguredChat(`Test: two-chat ${n}`);
+			const chat = (await createConfiguredChat(`Test: two-chat ${n}`));
 			createdChats.push(chat.id);
 			return { n, engine, chat };
-		});
+		}));
 
 		const views = new Map<string, Promise<string>>();
 		for (const { chat, engine } of chats) {
@@ -1289,7 +1285,7 @@ describe("background-turn runner (owner ruling 2026-09-25: every turn is a serve
 			assert.ok(text.includes("Gated reply."), `chat ${chat.id} view replayed its own turn`);
 			assert.ok(text.endsWith("data: [DONE]\n\n"), `chat ${chat.id} view closed at settle`);
 			await waitFor(() => !isTurnRunning(chat.id), 8000, `chat ${chat.id} settle`);
-			assert.equal(chatStore.getChat(chat.id)!.messages.length, 2, `chat ${chat.id} persisted its full turn`);
+			assert.equal((await chatStore.getChat(chat.id))!.messages.length, 2, `chat ${chat.id} persisted its full turn`);
 		}
 	});
 });
@@ -1316,7 +1312,7 @@ it("explain tool call persists as a pending part; the free-text answer reveals t
 			return fauxAssistantMessage([fauxText("Right — it hugs the Sun.")]);
 		},
 	]);
-	const chat = createConfiguredChat("Test: explain mechanic");
+	const chat = (await createConfiguredChat("Test: explain mechanic"));
 	createdChats.push(chat.id);
 
 	// Free-recall armed: the mechanic swap is the ONLY change to the registry.
@@ -1330,7 +1326,7 @@ it("explain tool call persists as a pending part; the free-text answer reveals t
 		createTeacherAgent(undefined, { engine, messages: opts.messages, tools });
 	await drainTurn(post(chat.id, { type: "text", text: "teach me the solar system" }), factory);
 
-	const saved1 = chatStore.getChat(chat.id)!;
+	const saved1 = (await chatStore.getChat(chat.id))!;
 	const savedContent1 = (saved1.messages[1] as { content: unknown }).content as Array<{ type: string; name?: string }>;
 	const call = savedContent1.find((b) => b.type === "toolCall" && b.name === "explain");
 	assert.ok(call, "explain tool call persisted");
@@ -1357,7 +1353,7 @@ it("explain tool call persists as a pending part; the free-text answer reveals t
 
 	await drainTurn(post(chat.id, { type: "answer", toolCallId: "call-1", answer }), factory);
 
-	const saved2 = chatStore.getChat(chat.id)!;
+	const saved2 = (await chatStore.getChat(chat.id))!;
 	const view2 = projectView(saved2.messages);
 	const part = view2[1]!.parts.find((p) => p.type === "tool-explain");
 	assert.equal((part as { state?: string }).state, "output-available");
@@ -1380,17 +1376,17 @@ it("explain tool call persists as a pending part; the free-text answer reveals t
 describe("the silent dismissal (A2)", () => {
 	it("writes the toolResult with NO wake — the next plain message carries it to the model", async () => {
 		const { engine, calls } = scriptedTeacher(defaultLesson);
-		const chat = createConfiguredChat("Test: silent dismissal");
+		const chat = (await createConfiguredChat("Test: silent dismissal"));
 		createdChats.push(chat.id);
 
 		// Turn 1: the quiz dangles.
 		await drainTurn(post(chat.id, { type: "text", text: "teach me the solar system" }), agentFactory(engine));
-		assert.ok(danglingQuestionOf(chatStore.getChat(chat.id)!.messages), "the quiz is pending");
+		assert.ok(danglingQuestionOf((await chatStore.getChat(chat.id))!.messages), "the quiz is pending");
 
 		// The dismissal: SILENT — record completes the call, nothing wakes.
 		const res = await dismissPost(chat.id, "call-1");
 		assert.equal(res.status, 200);
-		const saved = chatStore.getChat(chat.id)!;
+		const saved = (await chatStore.getChat(chat.id))!;
 		assert.equal(danglingQuestionOf(saved.messages), null, "the call is answered by the dismissal");
 		const tail = saved.messages[saved.messages.length - 1]! as { role?: string; details?: { dismissed?: boolean } };
 		assert.equal(tail.role, "toolResult");
@@ -1405,23 +1401,23 @@ describe("the silent dismissal (A2)", () => {
 		await drainTurn(post(chat.id, { type: "text", text: "skip that — tell me about Mars" }), agentFactory(engine));
 		assert.equal(calls.length, 2, "exactly one wake: the user's message");
 		assert.match(calls[1]!.join("\n"), /dismissed/, "the dismissed result rode the wake's context");
-		assert.equal(endsInDismissal(chatStore.getChat(chat.id)!.messages), false, "the pause lifted with the send");
+		assert.equal(endsInDismissal((await chatStore.getChat(chat.id))!.messages), false, "the pause lifted with the send");
 	});
 
 	it("rejects honestly: unknown chat 404, no dangling question 400", async () => {
 		assert.equal((await dismissPost("chat_nonexistent", "call-x")).status, 404);
-		const chat = createConfiguredChat("Test: dismiss no question");
+		const chat = (await createConfiguredChat("Test: dismiss no question"));
 		createdChats.push(chat.id);
-		chatStore.saveMessages(chat.id, [{ id: "u1", role: "user", content: "hi", timestamp: 1 } as never]);
+		(await chatStore.saveMessages(chat.id, [{ id: "u1", role: "user", content: "hi", timestamp: 1 } as never]));
 		assert.equal((await dismissPost(chat.id, "call-x")).status, 400);
 	});
 
 	it("parallel quizzes dismiss call-by-call — the composer returns only when nothing dangles", async () => {
-		const chat = createConfiguredChat("Test: parallel dismiss");
+		const chat = (await createConfiguredChat("Test: parallel dismiss"));
 		createdChats.push(chat.id);
 		// Two quiz calls in one assistant message (the sequential-execution
 		// shape the tools opt into).
-		chatStore.saveMessages(chat.id, [
+		(await chatStore.saveMessages(chat.id, [
 			{ id: "u1", role: "user", content: "hello", timestamp: 1 } as never,
 			{
 				id: "a1",
@@ -1437,18 +1433,18 @@ describe("the silent dismissal (A2)", () => {
 				stopReason: "toolUse",
 				timestamp: 1,
 			} as never,
-		]);
+		]));
 
 		// First dismissal completes call-a; call-b still dangles.
 		assert.equal((await dismissPost(chat.id, "call-a")).status, 200);
-		const pending = danglingQuestionOf(chatStore.getChat(chat.id)!.messages);
+		const pending = danglingQuestionOf((await chatStore.getChat(chat.id))!.messages);
 		assert.equal(pending?.toolCallId, "call-b", "the dock advances to the next question");
-		assert.equal(endsInDismissal(chatStore.getChat(chat.id)!.messages), true);
+		assert.equal(endsInDismissal((await chatStore.getChat(chat.id))!.messages), true);
 
 		// Second dismissal: nothing dangles, still paused.
 		assert.equal((await dismissPost(chat.id, "call-b")).status, 200);
-		assert.equal(danglingQuestionOf(chatStore.getChat(chat.id)!.messages), null, "the composer may return");
-		assert.equal(endsInDismissal(chatStore.getChat(chat.id)!.messages), true, "paused until the user speaks");
+		assert.equal(danglingQuestionOf((await chatStore.getChat(chat.id))!.messages), null, "the composer may return");
+		assert.equal(endsInDismissal((await chatStore.getChat(chat.id))!.messages), true, "paused until the user speaks");
 	});
 });
 
@@ -1484,13 +1480,13 @@ describe("parallel question calls: the answer defers its wake while a sibling da
 
 	it("the sibling answer wakes NOTHING; the last answer fires the one turn with both results adjacent", async () => {
 		const { engine, calls } = scriptedTeacher(parallelLesson);
-		const chat = createConfiguredChat("Test: parallel questions");
+		const chat = (await createConfiguredChat("Test: parallel questions"));
 		createdChats.push(chat.id);
 
 		// Turn 1: the batch lands; both calls dangle (the dock shows the quiz —
 		// the first in call order).
 		await drainTurn(post(chat.id, { type: "text", text: "ask me two questions in parallel" }), agentFactory(engine));
-		let saved = chatStore.getChat(chat.id)!;
+		let saved = (await chatStore.getChat(chat.id))!;
 		let pending = danglingQuestionOf(saved.messages);
 		assert.equal(pending?.toolCallId, "call-1", "the dock holds the quiz first");
 
@@ -1499,7 +1495,7 @@ describe("parallel question calls: the answer defers its wake while a sibling da
 		const quizAns = gradedAnswer(QUIZ_INPUT, ["Mercury"]);
 		await drainTurn(post(chat.id, { type: "answer", toolCallId: "call-1", answer: quizAns }), agentFactory(engine));
 		assert.equal(calls.length, 1, "the sibling answer woke NOTHING (the gate deferred)");
-		saved = chatStore.getChat(chat.id)!;
+		saved = (await chatStore.getChat(chat.id))!;
 		assert.equal((saved.messages[2] as { toolCallId?: string }).toolCallId, "call-1", "quiz result adjacent to the batch");
 		pending = danglingQuestionOf(saved.messages);
 		assert.equal(pending?.toolCallId, "call-2", "the dock advances to the ask immediately — no turn ran");
@@ -1516,7 +1512,7 @@ describe("parallel question calls: the answer defers its wake while a sibling da
 		};
 		await drainTurn(post(chat.id, { type: "answer", toolCallId: "call-2", answer: askAns }), agentFactory(engine));
 		assert.equal(calls.length, 2, "exactly one wake: the last answer's turn");
-		saved = chatStore.getChat(chat.id)!;
+		saved = (await chatStore.getChat(chat.id))!;
 		assert.equal(danglingQuestionOf(saved.messages), null, "nothing dangles anymore");
 		const prompt2 = calls[1]!.join("\n");
 		assert.match(prompt2, /Mercury/, "the quiz result rode the wake's context");
@@ -1552,7 +1548,7 @@ describe("parallel rounds: the LAST resolution decides the wake (owner ruling 20
 
 	it("round 1 — answer then dismiss: NO wake at all (ending on a dismissal pauses)", async () => {
 		const { engine, calls } = scriptedTeacher(batchLesson);
-		const chat = createConfiguredChat("Test: round 1");
+		const chat = (await createConfiguredChat("Test: round 1"));
 		createdChats.push(chat.id);
 		await drainTurn(post(chat.id, { type: "text", text: "two questions please" }), agentFactory(engine));
 
@@ -1563,7 +1559,7 @@ describe("parallel rounds: the LAST resolution decides the wake (owner ruling 20
 		// Dismiss the ask — the LAST resolution is a dismissal: no continuation
 		// seam may fire either (the round-1 incident's leak, now closed).
 		assert.equal((await dismissPost(chat.id, "call-2", "ask")).status, 200);
-		const saved = chatStore.getChat(chat.id)!;
+		const saved = (await chatStore.getChat(chat.id))!;
 		assert.equal(danglingQuestionOf(saved.messages), null);
 		assert.equal(needsContinuation(saved.messages), false, "ending on a dismissal owes nothing");
 		assert.equal(endsInDismissal(saved.messages), true, "the session sits paused");
@@ -1572,7 +1568,7 @@ describe("parallel rounds: the LAST resolution decides the wake (owner ruling 20
 
 	it("round 2 — dismiss then answer: exactly one wake carrying both results", async () => {
 		const { engine, calls } = scriptedTeacher(batchLesson);
-		const chat = createConfiguredChat("Test: round 2");
+		const chat = (await createConfiguredChat("Test: round 2"));
 		createdChats.push(chat.id);
 		await drainTurn(post(chat.id, { type: "text", text: "two questions please" }), agentFactory(engine));
 
@@ -1601,7 +1597,7 @@ describe("composer steering: POST /api/chats/[id]/steer", () => {
 		);
 
 	it("honest rejections: 404 unknown chat, 400 bad input, 409 when no turn is live", async () => {
-		const chat = createConfiguredChat("Test: steer rejections");
+		const chat = (await createConfiguredChat("Test: steer rejections"));
 		createdChats.push(chat.id);
 		assert.equal((await steerPost("chat_nope", { input: { type: "steer", id: "steer_1", text: "hi" } })).status, 404);
 		assert.equal((await steerPost(chat.id, { input: { type: "steer", id: "", text: "hi" } })).status, 400);
@@ -1633,7 +1629,7 @@ describe("composer steering: POST /api/chats/[id]/steer", () => {
 		]);
 		const engine = { model: faux.getModel(), streamFn: faux.streamSimple };
 
-		const chat = createConfiguredChat("Test: steer live");
+		const chat = (await createConfiguredChat("Test: steer live"));
 		createdChats.push(chat.id);
 
 		// The turn starts and holds at the first model call.
@@ -1658,7 +1654,7 @@ describe("composer steering: POST /api/chats/[id]/steer", () => {
 		assert.match(calls[1]!.join("\n"), /also cover Venus/, "the model saw the steer in its context");
 
 		// The record persists the user steer in its true position.
-		const saved = chatStore.getChat(chat.id)!;
+		const saved = (await chatStore.getChat(chat.id))!;
 		const roles = saved.messages.map((m) => (m as { role?: string }).role);
 		assert.deepEqual(roles, ["user", "assistant", "user", "assistant"], "text → teaching → STEER → steered reply");
 		const steerMsg = saved.messages[2] as { id?: string; content?: unknown };
@@ -1698,11 +1694,11 @@ describe("duplicate provider tool-call ids (the Lacan fix)", () => {
 			() => fauxAssistantMessage([fauxText("Right — and that is where Lacan begins.")]),
 		]);
 
-		const chat = createConfiguredChat("Lacan: duplicate call_0 turns");
+		const chat = (await createConfiguredChat("Lacan: duplicate call_0 turns"));
 		createdChats.push(chat.id);
 		// Turn 1: the ask question.
 		await drainTurn(post(chat.id, { type: "text", text: "teach me Lacan" }), agentFactory(engine));
-		let saved = chatStore.getChat(chat.id)!;
+		let saved = (await chatStore.getChat(chat.id))!;
 		let pending = danglingQuestionOf(saved.messages)!;
 		assert.equal(pending.tool, "ask_user_question");
 		// The client answers with the id IT SAW — the persisted one.
@@ -1710,7 +1706,7 @@ describe("duplicate provider tool-call ids (the Lacan fix)", () => {
 		await drainTurn(post(chat.id, { type: "answer", toolCallId: askId, answer: { kind: "ask", questionText: ASK.question, dontKnow: false, answers: [], text: "The theory core", answeredAt: new Date().toISOString() }, }), agentFactory(engine));
 
 		// Turn 2: the quiz — ALSO `call_0` from the provider.
-		saved = chatStore.getChat(chat.id)!;
+		saved = (await chatStore.getChat(chat.id))!;
 		pending = danglingQuestionOf(saved.messages)!;
 		assert.equal(pending.tool, "quiz");
 		const quizId = pending.toolCallId;
@@ -1718,7 +1714,7 @@ describe("duplicate provider tool-call ids (the Lacan fix)", () => {
 		assert.match(quizId, /^call_0~\d+$/, "mint scheme: orig~n");
 		await drainTurn(post(chat.id, { type: "answer", toolCallId: quizId, answer: gradedAnswer(QUIZ2, ["Mercury"]) }), agentFactory(engine));
 
-		saved = chatStore.getChat(chat.id)!;
+		saved = (await chatStore.getChat(chat.id))!;
 		// The invariant: CALL ids are unique among themselves (a call and its
 		// own result share one id by design — that pair is the point).
 		const callIds = saved.messages.flatMap(
