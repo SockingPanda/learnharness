@@ -25,7 +25,7 @@ before(async () => {
 	Object.defineProperty(process, "send", { configurable: true, value: (message: any, callback?: () => void) => {
 		queueMicrotask(() => {
 			ipc({ channel: "lh:chatgpt", id: message.id, op: message.op,
-				...(message.op === "lease" && leaseError ? { ok: false, error: leaseError, stamp: { epoch: 1, authorityRevision: 1, revision: 1 } } : { ok: true, value: message.op === "lease" ? { accessToken: "scratch-oauth-only", accountId: "scratch-account", epoch: 1, authorityRevision: 1, revision: 1 } : { epoch: 1, authorityRevision: 1, revision: 1, status, accountId: "scratch-account", models: [{ id: model.id, name: "Scratch account model" }, { id: "unknown-capabilities", name: "Do not invent capabilities" }] } }),
+				...(message.op === "lease" && leaseError ? { ok: false, error: leaseError, stamp: { epoch: 1, authorityRevision: 1, revision: 1 } } : { ok: true, value: message.op === "lease" ? { accessToken: "scratch-oauth-only", accountId: "scratch-account", epoch: 1, authorityRevision: 1, revision: 1 } : { epoch: 1, authorityRevision: 1, revision: 1, status, accountId: "scratch-account", models: [{ id: model.id, name: "Scratch account model" }, { id: "unknown-capabilities", name: "Do not invent capabilities" }, { id: "gpt-future-terra", name: "Future Terra", contextWindow: 500000, input: ["text", "image"], reasoningEfforts: ["low", "medium", "max", "ultra"] }] } }),
 			});
 		});
 		callback?.(); return true;
@@ -49,8 +49,8 @@ const usage = { input_tokens: 10, output_tokens: 4, total_tokens: 14, input_toke
 const complete = (output: unknown[] = []) => ({ type: "response.completed", response: { id: "resp_scratch", status: "completed", output, usage } });
 const context = () => normalizeContext({ systemPrompt: "Scratch teacher instructions", messages: [{ role: "user", content: [{ type: "text", text: "Scratch learning material" }, { type: "image", data: "c2NyYXRjaA==", mimeType: "image/png" }], timestamp: 1 }], tools: [{ name: "scratch_tool", description: "Scratch local tool", parameters: Type.Object({ value: Type.String() }) }] });
 
-test("catalog intersects supported capabilities, without inventing model limits", () => {
-	assert.equal(chatGPTModels().length, 1);
+test("catalog retains legacy capabilities and discovers new account models", () => {
+	assert.equal(chatGPTModels().length, 2);
 	assert.equal(chatGPTModels()[0]!.provider, "chatgpt");
 	assert.equal(chatGPTModels()[0]!.contextWindow, model.contextWindow);
 	assert.deepEqual(chatGPTModels()[0]!.input, model.input);
@@ -168,6 +168,25 @@ test("case-insensitive Authorization overrides including null are refused before
 		assert.equal((await engine.streamFn(engine.model, context(), { headers }).result()).stopReason, "error");
 	}
 	assert.equal(requests.length, before);
+});
+
+
+test("a newly discovered model streams through the scoped subscription without API-key fallback", async () => {
+	requests = [];
+	responseEvents = [complete()];
+	const engine = piEngineForSpec({ provider: "chatgpt", id: "gpt-future-terra", thinkingLevel: "low" }, false);
+	assert(engine);
+	const stream = engine.streamFn(engine.model, context(), {});
+	for await (const _event of stream) { /* drain native stream */ }
+	const result = await stream.result();
+	assert.equal(result.stopReason, "stop");
+	assert.equal(result.provider, "chatgpt");
+	assert.equal(result.model, "gpt-future-terra");
+	assert.equal(requests.length, 1);
+	assert.equal(requests[0]!.authorization, "Bearer scratch-oauth-only");
+	assert.equal(requests[0]!.body.model, "gpt-future-terra");
+	assert.equal(requests[0]!.body.max_output_tokens, undefined);
+	assert.equal(requests[0]!.body.reasoning.effort, "low");
 });
 
 test("full credential-storage invalidation aborts foreground and background controllers and clears capabilities", () => {

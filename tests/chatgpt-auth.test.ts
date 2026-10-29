@@ -682,3 +682,18 @@ test("private leases bind active account, authority revision and raw visible mod
 		assert.equal((await f.rawLease(false, expected)).accountId, catalog.accountId);
 	} finally { f.service.close(); }
 });
+
+
+test("account capability changes invalidate catalog authority without leaking raw metadata", async () => {
+	let window = 500000;
+	const f = await loggedIn({ provider: async (target) => target.endsWith("/models") ? Response.json({ models: [{ slug: "gpt-future-terra", display_name: "Future Terra", visibility: "list", context_window: window, input_modalities: ["text", "image"], supported_reasoning_levels: [{ effort: "low" }, { effort: "max" }], base_instructions: "must not cross IPC" }] }) : undefined });
+	try {
+		const first = await f.service.models();
+		assert.deepEqual(first.models, [{ id: "gpt-future-terra", name: "Future Terra", contextWindow: 500000, input: ["text", "image"], reasoningEfforts: ["low", "max"] }]);
+		window = 600000;
+		const next = await f.service.models();
+		assert(next.authorityRevision > first.authorityRevision);
+		await assert.rejects(f.rawLease(false, { expectedAccountId: first.accountId, expectedAuthorityRevision: first.authorityRevision, selectedModelId: "gpt-future-terra" }), /catalog/);
+		assert.equal((await f.rawLease(false, { expectedAccountId: next.accountId, expectedAuthorityRevision: next.authorityRevision, selectedModelId: "gpt-future-terra" })).accessToken, "scratch-oauth-token");
+	} finally { f.service.close(); }
+});
