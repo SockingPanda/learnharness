@@ -23,7 +23,11 @@ import type {
 	ExtractionStageUsage,
 	SessionFindings,
 } from "../../core/contracts.ts";
-import { getGraph, mergeFindings, type DerivedGraph, type EmissionStats, type GraphDeps } from "../../core/graph.ts";
+import { readDerivedGraph } from "../graph-storage.ts";
+import { graphDraft } from "../../core/storage-snapshot.ts";
+import { withGraphWrite } from "../../core/storage-coordination.ts";
+import { isStorageStopping, StorageStoppingError } from "../../core/storage-lifecycle.ts";
+import { mergeFindings, type MergeSource, type DerivedGraph, type EmissionStats, type GraphDeps } from "../../core/graph.ts";
 import type { GraphStore } from "../../core/ports.ts";
 import { emit } from "../../core/events.ts";
 import { settleGraphLayout } from "../../core/layout-settle.ts";
@@ -700,6 +704,9 @@ export function extractionStatuses(): RunningExtraction[] {
 	return [...runs().running.values()].sort((a, b) => a.startedAt - b.startedAt);
 }
 
+/** Includes asynchronous preparation and final persistence, not just model loops. */
+export function activeExtractionIds(): string[] { return [...runs().inFlight]; }
+
 /** True cancellation of the in-flight run for a chat (the dock's abort
  *  button): the pending model call receives the signal — the provider
  *  cancels the request, spend stops — and the run ends like a failure:
@@ -940,7 +947,8 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 		// on it. Serialized batches make this read the post-merge graph of
 		// every earlier batch (cross-source runs stay parallel — the
 		// digest is source-scoped, so only SAME-source order matters).
-		const graph = getGraph(graphStore);
+		const graph = await readDerivedGraph(graphStore);
+		signal?.throwIfAborted();
 		const digest = sourceDigest(graph, sourceId);
 		const prompt = digest === "" ? view : `${digest}\n\n${view}`;
 		console.info(
@@ -969,7 +977,8 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 	async function audit(jobKey: string, sourceId: string, findings: SessionFindings): Promise<AuditVerdicts> {
 		const signal = runningExtractions.get(jobKey)?.controller.signal;
 		signal?.throwIfAborted(); // an abort during the extract→audit gap ends here
-		const graph = getGraph(graphStore);
+		const graph = await readDerivedGraph(graphStore);
+		signal?.throwIfAborted();
 		console.info(
 			`[extraction ${jobKey}] auditor starting (${findings.propositions.length} propositions, ` +
 				`${graph.nodes.length} graph nodes)`,
@@ -1015,6 +1024,26 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 	}
 
 
+	/** A detached domain draft becomes one durable graph change. */
+	async function commitFindings(jobKey: string, sourceId: string, findings: SessionFindings, verdicts: AuditVerdicts, source: MergeSource): Promise<EmissionStats> {
+		return withGraphWrite(async () => {
+			if (isStorageStopping()) throw new DOMException("Application is shutting down", "AbortError");
+			const run = runningExtractions.get(jobKey);
+			run?.controller.signal.throwIfAborted();
+			if (run?.kind === "chat") {
+				const chat = await chatStore.getChat(sourceId);
+				if (!chat || chat.deleting) throw new DOMException(`Chat deleted during extraction: ${sourceId}`, "AbortError");
+			}
+			const draft = graphDraft(await graphStore.readSnapshot());
+			const stats = mergeFindings(sourceId, findings, verdicts, { graphStore: draft.store }, source);
+			settleGraphLayout(draft.store);
+			if (isStorageStopping()) throw new DOMException("Application is shutting down", "AbortError");
+			run?.controller.signal.throwIfAborted();
+			await graphStore.commitBatch(draft.batch(`merge:${jobKey}:${run?.startedAt ?? crypto.randomUUID()}`));
+			return stats;
+		});
+	}
+
 	/** THE EXTRACT SLOT (unified 2026-09-29): extraction chunk jobs run
 	 *  under the SHARED background-LLM semaphore — one process-wide pool
 	 *  of 3 permits (see bg-llm-semaphore.ts). The
@@ -1030,7 +1059,7 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 	 *  or failure: a failed run still spent money, and its partial usage is
 	 *  exactly what the record should show (stats absent = never merged).
 	 *  Idempotent per startedAt (the store dedupes). */
-	function persistRunUsage(jobKey: string, durationMs: number, stats: EmissionStats | undefined): void {
+	async function persistRunUsage(jobKey: string, durationMs: number, stats: EmissionStats | undefined): Promise<void> {
 		const run = runningExtractions.get(jobKey);
 		if (!run) return; // not running (tests driving stages directly)
 		// PER-CHUNK JOBS (owner, 2026-09-28): the registry KEY may carry a
@@ -1040,7 +1069,10 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 		// usage log to append to — the record's death is the user's choice
 		// and its partial spend logs with it (appendSourceUsage below
 		// already no-ops for a vanished source; the chat path guards here).
-		if (run.kind === "chat" && !chatStore.getChat(run.chatId)) return;
+		if (run.kind === "chat") {
+			const record = await chatStore.getChat(run.chatId);
+			if (!record || record.deleting) return;
+		}
 		const entry: ExtractionRunUsage = {
 			startedAt: run.startedAt,
 			at: new Date().toISOString(),
@@ -1051,8 +1083,8 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 				auditor: run.usage.auditor ?? { model: "unknown", steps: [] },
 			},
 		};
-		if (run.kind === "notes") graphStore.appendSourceUsage(run.chatId, entry);
-		else chatStore.appendExtractionUsage(run.chatId, entry);
+		if (run.kind === "notes") await graphStore.appendSourceUsage(run.chatId, entry);
+		else await chatStore.appendExtractionUsage(run.chatId, entry);
 	}
 
 	/** One chunk/batch JOB (per-chunk jobs, owner 2026-09-28): the registry
@@ -1068,11 +1100,12 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 		const jobKey = source.part ? `${source.id}#${source.part.i}` : source.id;
 		const t0 = performance.now();
 		try {
+			if (isStorageStopping()) throw new DOMException("Application is shutting down", "AbortError");
 			const stats = await body(jobKey);
-			persistRunUsage(jobKey, Math.round(performance.now() - t0), stats);
+			await persistRunUsage(jobKey, Math.round(performance.now() - t0), stats);
 			return stats;
 		} catch (err) {
-			persistRunUsage(jobKey, Math.round(performance.now() - t0), undefined);
+			await persistRunUsage(jobKey, Math.round(performance.now() - t0), undefined);
 			throw err;
 		} finally {
 			finishExtraction(jobKey);
@@ -1115,8 +1148,9 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 	}
 
 	async function runExtraction(chatId: string): Promise<EmissionStats> {
+		if (isStorageStopping()) throw new StorageStoppingError();
 		if (inFlight.has(chatId)) {
-			if (chatStore.getChat(chatId)?.kind === "reading") readingFollowups.add(chatId);
+			if ((await chatStore.getChat(chatId))?.kind === "reading") readingFollowups.add(chatId);
 			return { nodes: 0, chains: 0 };
 		}
 		inFlight.add(chatId);
@@ -1131,15 +1165,16 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 		// error below loses at most the in-flight batch — every earlier
 		// batch stays covered, the rest stays visibly uncovered.
 		try {
-			const record = chatStore.getChat(chatId);
-			if (!record) throw new Error(`Chat not found: ${chatId}`);
+			const record = await chatStore.getChat(chatId);
+			if (isStorageStopping()) throw new DOMException("Application is shutting down", "AbortError");
+			if (!record || record.deleting) throw new Error(`Chat not found: ${chatId}`);
 			if (record.kind === "reading") readingLength = record.messages.length;
 			// BYOK per-need gate (owner, 2026-09-22) + key presence
 			// (2026-09-25): the write channel needs extractor + auditor
 			// engines AND their providers' keys; a refusal lands BEFORE any
 			// stage runs (typed — the trigger skips, routes surface 503).
 			refuseIfStagesUnready();
-			const covered = coverageOf(record.messages, graphStore.readCoverage(), chatId, record.kind === "reading");
+			const covered = coverageOf(record.messages, await graphStore.readCoverage(), chatId, record.kind === "reading");
 			const failedOutputCalls = failedOutputCallIds(record.messages);
 			if (covered.uncovered.length === 0) {
 				console.info(`[extraction ${chatId}] nothing uncovered — no-op`);
@@ -1203,7 +1238,7 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 								// as one sync block; this closes the last window — a run that slipped
 								// past the wind-down finds the chat gone HERE and rides the existing
 								// abort path (info, not error): nothing merged, nothing checkpointed.
-								if (!chatStore.getChat(chatId)) {
+								if (!(await chatStore.getChat(chatId))) {
 									const gone = new Error(`chat deleted mid-run: ${chatId}`);
 									gone.name = "AbortError";
 									throw gone;
@@ -1213,7 +1248,7 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 								// merges in), the stored fingerprint won't match its new
 								// one and it re-opens: honest by construction.
 								const foldedAt = new Date().toISOString();
-								const batchStats = mergeFindings(chatId, findings, auditResult, { chatStore, graphStore }, {
+								const batchStats = await commitFindings(jobKey, chatId, findings, auditResult, {
 									foldedAt,
 									coverage: batch
 										.filter((slot) => slot.tokens > 0)
@@ -1221,7 +1256,7 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 								});
 								// The layout ledger evolves with the merge (sync — the
 								// next snapshot fetch must already reflect the new nodes).
-								settleGraphLayout(graphStore);
+
 								console.info(
 									`[extraction ${jobKey}] merged: ${batchStats.nodes} nodes, ${batchStats.chains ?? 0} chains`,
 								);
@@ -1256,8 +1291,8 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 			inFlight.delete(chatId);
 			finishExtraction(chatId); // done or failed — no longer running
 			const pending = readingFollowups.delete(chatId);
-			const fresh = pending && !wasAborted && readingLength !== null ? chatStore.getChat(chatId) : null;
-			if (fresh?.kind === "reading" && fresh.messages.length > readingLength!) {
+			const fresh = pending && !wasAborted && readingLength !== null ? await chatStore.getChat(chatId) : null;
+			if (fresh?.kind === "reading" && !fresh.deleting && fresh.messages.length > readingLength!) {
 				void runExtraction(chatId).catch((error) => console.error(`[extraction ${chatId}] reading follow-up failed:`, error));
 			}
 		}
@@ -1306,7 +1341,8 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 		const view = notesView(input);
 		// Same digest law as the chat door (owner, 2026-09-30 evening): the
 		// chunk extractor continues its own source, ids verbatim.
-		const graph = getGraph(graphStore);
+		const graph = await readDerivedGraph(graphStore);
+		signal?.throwIfAborted();
 		const digest = sourceDigest(graph, input.id);
 		const prompt = digest === "" ? view : `${digest}\n\n${view}`;
 		console.info(
@@ -1383,11 +1419,11 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 								setPhase(jobKey, "auditing", "notes", input.filePath, part);
 								const auditResult = await audit(jobKey, input.id, findings);
 								setPhase(jobKey, "merging", "notes", input.filePath, part);
-								const merged = mergeFindings(
+								const merged = await commitFindings(
+									jobKey,
 									id,
 									findings,
 									auditResult,
-									{ chatStore, graphStore },
 									{ foldedAt: input.importedAt },
 								);
 								// Capture the committed merge BEFORE layout/usage can fail.
@@ -1397,7 +1433,7 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 									mergedStats.droppedChains = (mergedStats.droppedChains ?? 0) + merged.droppedChains;
 								// The layout ledger evolves with each merge — the next
 								// snapshot fetch reflects every finished chunk.
-								settleGraphLayout(graphStore);
+
 								console.info(`[extraction ${jobKey}] merged: ${merged.nodes} nodes, ${merged.chains ?? 0} chains`);
 								return merged;
 							});
@@ -1447,13 +1483,15 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 	/** Every explicit import processes the whole file. Identity, source digest,
 	 * auditor and usage history remain source-scoped; this is not exactly-once. */
 	async function importNotes(input: NotesImportInput): Promise<EmissionStats> {
+		if (isStorageStopping()) throw new StorageStoppingError();
 		const id = `src_${crypto.createHash("sha256").update(input.filePath).digest("hex").slice(0, 12)}`;
 		// Acquire BEFORE source upsert: overlapping contents must not alter metadata.
 		if (inFlight.has(id)) throw new NotesImportError("busy", { nodes: 0, chains: 0 }, "This file is already being imported. Try again when it finishes.");
 		inFlight.add(id);
 		try {
 			const importedAt = new Date().toISOString();
-			graphStore.upsertSource({ id, filePath: input.filePath, importedAt });
+			await graphStore.upsertSource({ id, filePath: input.filePath, importedAt });
+			if (isStorageStopping()) throw new DOMException("Application is shutting down", "AbortError");
 			return await runNotesExtraction({ id, ...input, importedAt });
 		} catch (err) {
 			if (err instanceof NotesImportError || err instanceof ModelsNotConfiguredError || err instanceof ProviderKeyMissingError) throw err;

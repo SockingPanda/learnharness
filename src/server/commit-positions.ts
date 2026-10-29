@@ -21,6 +21,8 @@
 import type { Position } from "../core/contracts.ts";
 import { deriveView, getGraph } from "../core/graph.ts";
 import { settleGraphLayout } from "../core/layout-settle.ts";
+import { graphDraft } from "../core/storage-snapshot.ts";
+import { withGraphWrite } from "../core/storage-coordination.ts";
 import { stores } from "./stores.ts";
 
 /** Max |x| or |y| accepted — NaN/Infinity clamp here, absurd too. */
@@ -31,7 +33,9 @@ const MAX_COORD = 1e6;
  * sanitized positions actually persisted (empty object = nothing written,
  * e.g. a body with no known ids — the caller reports but never fails).
  */
-export function commitPositions(input: unknown): Record<string, Position> {
+export function commitPositions(input: unknown): Promise<Record<string, Position>> {
+	return withGraphWrite(async () => {
+	const draft = graphDraft(await stores.graphStore.readSnapshot());
 	if (typeof input !== "object" || input === null) return {};
 	const raw = input as Record<string, unknown>;
 
@@ -39,7 +43,7 @@ export function commitPositions(input: unknown): Record<string, Position> {
 	// the DERIVED arg_ implication nodes (deriveView of the current graph
 	// — the same derivation the snapshot serves, so ids agree by
 	// construction).
-	const known = new Set(deriveView(getGraph(stores.graphStore)).nodes.map((n) => n.id));
+	const known = new Set(deriveView(getGraph(draft.store)).nodes.map((n) => n.id));
 
 	const positions: Record<string, Position> = {};
 	for (const [id, value] of Object.entries(raw)) {
@@ -55,7 +59,7 @@ export function commitPositions(input: unknown): Record<string, Position> {
 	}
 	if (Object.keys(positions).length === 0) return {};
 
-	stores.graphStore.writePositions(positions);
+	draft.store.writePositions(positions);
 
 	// The graph grew past what the client knew (a merge landed mid-drag):
 	// absorb the new nodes with the client's rest state as anchors. The
@@ -64,9 +68,11 @@ export function commitPositions(input: unknown): Record<string, Position> {
 	// comparison broke once args counted as persistable).
 	for (const id of known) {
 		if (!(id in positions)) {
-			settleGraphLayout(stores.graphStore);
+			settleGraphLayout(draft.store);
 			break;
 		}
 	}
+	await stores.graphStore.commitBatch(draft.batch(`positions:${crypto.randomUUID()}`));
 	return positions;
+	});
 }

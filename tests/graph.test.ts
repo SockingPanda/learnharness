@@ -23,7 +23,8 @@ import type { AuditVerdicts, GraphChain, GraphNode, SessionFindings } from "../s
 import type { QuestionAnswerData } from "../src/core/question-core.ts";
 import type { LhMessage } from "../src/core/native-messages.ts";
 import { projectView as projectNative } from "../src/core/view.ts";
-import { deriveView, getGraph, graphSnapshot, mergeFindings, type GraphDeps } from "../src/core/graph.ts";
+import { getGraph, graphSnapshot, mergeFindings, deleteChatTraces, deleteNodeTraces } from "./graph-test-adapters.ts";
+import { deriveView, type GraphDeps } from "../src/core/graph.ts";
 import { coverageSlots } from "../src/core/coverage.ts";
 import { graphStore } from "../src/store/graph.ts";
 import { chatStore } from "../src/store/chats.ts";
@@ -35,8 +36,8 @@ const graphDeps = { chatStore, graphStore } as const satisfies GraphDeps;
 /** The session merge source for a chat — what the pipeline passes: the
  *  fold stamp only (the merger reads no transcript; quiz-event rebuilding
  *  died with the events ledger, 2026-09-27). */
-function sessionSource(chatId: string): { foldedAt: string } {
-	const record = chatStore.getChat(chatId)!;
+async function sessionSource(chatId: string): Promise<{ foldedAt: string }> {
+	const record = (await chatStore.getChat(chatId))!;
 	return { foldedAt: record.updatedAt };
 }
 
@@ -154,11 +155,11 @@ function answer(over: Partial<QuestionAnswerData>): QuestionAnswerData {
 
 /** Create a chat in the real store with messages; returns the record.
  *  Tree-blind world: the plan tree is irrelevant to the merger — no tree. */
-function fixtureChat(title: string, messages: LhMessage[]) {
-	const chat = chatStore.createChat(title);
+async function fixtureChat(title: string, messages: LhMessage[]) {
+	const chat = (await chatStore.createChat(title));
 	createdChats.push(chat.id);
-	chatStore.saveMessages(chat.id, messages);
-	return chatStore.getChat(chat.id)!;
+	(await chatStore.saveMessages(chat.id, messages));
+	return (await chatStore.getChat(chat.id))!;
 }
 
 /** The full fixture transcript: five graded quizzes + a dismissed one + an ask. */
@@ -258,7 +259,7 @@ function fixtureVerdicts(): AuditVerdicts {
 }
 
 /** The chat every merger test folds (shared, so ordering is intentional). */
-const chat1 = fixtureChat("Graph fixture", fixtureMessages());
+const chat1 = (await fixtureChat("Graph fixture", fixtureMessages()));
 
 /** Set by the cross-session tests; the snapshot test (which runs after) reads them. */
 let chat2Id = "";
@@ -268,8 +269,8 @@ let chat3Id = "";
 
 /** Everything the graph holds for a set of chats (other processes' test
  *  emissions run concurrently against the same files — scope, never assume). */
-function scopedGraph(chatIds: string[]) {
-	const graph = getGraph(graphStore);
+async function scopedGraph(chatIds: string[]) {
+	const graph = (await getGraph(graphStore));
 	return {
 		nodes: graph.nodes.filter((n) => n.provenance.some((pt) => chatIds.includes(pt.chatId))),
 		chains: graph.chains.filter((c) => c.provenance.some((pt) => chatIds.includes(pt.chatId))),
@@ -277,11 +278,11 @@ function scopedGraph(chatIds: string[]) {
 }
 
 describe("the merger (mergeFindings)", () => {
-	it("creates nodes from the verdicts with chat-level provenance", () => {
-		const stats = mergeFindings(chat1.id, fixtureFindings(), fixtureVerdicts(), graphDeps, sessionSource(chat1.id));
+	it("creates nodes from the verdicts with chat-level provenance", async () => {
+		const stats = (await mergeFindings(chat1.id, fixtureFindings(), fixtureVerdicts(), graphDeps, (await sessionSource(chat1.id))));
 		assert.deepEqual(stats, { nodes: 3, chains: 1 });
 
-		const graph = scopedGraph([chat1.id]);
+		const graph = (await scopedGraph([chat1.id]));
 		assert.equal(graph.nodes.length, 3);
 		const idByStatement = new Map(graph.nodes.map((n) => [n.statement, n.id]));
 		for (const node of graph.nodes) {
@@ -307,20 +308,20 @@ describe("the merger (mergeFindings)", () => {
 
 	});
 
-	it("messageId anchors (2026-10-13): creates AND link-appends stamp the passage id; chains stay chat-level", () => {
+	it("messageId anchors (2026-10-13): creates AND link-appends stamp the passage id; chains stay chat-level", async () => {
 		// The session submit's anchor (owner, 2026-10-13): a proposition may
 		// carry its passage's message id — the merger stamps it into the
 		// node's provenance point for BOTH births and re-encounters. A
 		// caller without one (notes, legacy/core — pinned above) keeps "".
-		const chat = fixtureChat(
+		const chat = (await fixtureChat(
 			"Anchor fixture",
 			[
 				...user("u1", "teach anchors"),
 				...teacher("t1", "First anchored passage."),
 				...teacher("t2", "Second anchored passage."),
 			].flat(),
-		);
-		const first = mergeFindings(
+		));
+		const first = (await mergeFindings(
 			chat.id,
 			{
 				propositions: [{ id: "p1", name: "Anchored", statement: "Anchored statement", aliases: [], messageId: "t1" }],
@@ -328,15 +329,15 @@ describe("the merger (mergeFindings)", () => {
 			},
 			{ links: [] },
 			graphDeps,
-			sessionSource(chat.id),
-		);
+			(await sessionSource(chat.id)),
+		));
 		assert.equal(first.nodes, 1);
-		const created = scopedGraph([chat.id]).nodes.find((n) => n.statement === "Anchored statement")!;
+		const created = (await scopedGraph([chat.id])).nodes.find((n) => n.statement === "Anchored statement")!;
 		assert.deepEqual(created.provenance, [{ chatId: chat.id, messageId: "t1" }], "the created node anchors to its passage");
 
 		// The re-encounter: link-appended, anchored to ITS passage — while
 		// the chain the same job asserts stays chat-level.
-		const second = mergeFindings(
+		const second = (await mergeFindings(
 			chat.id,
 			{
 				propositions: [
@@ -347,28 +348,28 @@ describe("the merger (mergeFindings)", () => {
 			},
 			{ links: [{ id: "q1", linkTo: created.id }] },
 			graphDeps,
-			sessionSource(chat.id),
-		);
+			(await sessionSource(chat.id)),
+		));
 		assert.equal(second.nodes, 1, "q1 linked (no create), q2 created");
-		const linkLine = graphStore
-			.readNodes()
+		const linkLine = (await graphStore
+			.readNodes())
 			.filter((n) => n.id === created.id)
 			.find((line) => line.provenance.some((pt) => pt.chatId === chat.id && pt.messageId === "t2"));
 		assert.ok(linkLine, "the link-append line carries the re-encounter's passage id");
 		assert.equal(linkLine!.name, "Anchored again", "the appended line is the re-encounter (reads merge it into aliases)");
-		const chains = graphStore.readChains().filter((c) => c.provenance.some((pt) => pt.chatId === chat.id));
+		const chains = (await graphStore.readChains()).filter((c) => c.provenance.some((pt) => pt.chatId === chat.id));
 		assert.equal(chains.length, 1);
 		assert.deepEqual(chains[0]!.provenance, [{ chatId: chat.id, messageId: "" }], "chains stay chat-level — never anchored");
 	});
 
-	it("merges INDEPENDENTLY per call — no cross-run identity (owner, 2026-09-29)", () => {
+	it("merges INDEPENDENTLY per call — no cross-run identity (owner, 2026-09-29)", async () => {
 		// The mappings ledger is gone: resolution is a job-local in-memory
 		// map, so a second merge of the same verdicts knows nothing of the
 		// first. Cross-run identity is the AUDITOR's job (linkTo) plus the
 		// coverage ledger (nothing re-extracts) — never the merger's.
 		// (Own chat + unique statements — this suite stacks on shared
 		// files, so nothing here may touch the other tests' counts.)
-		const rep = fixtureChat("Independence fixture", [user("u1", "rep")].flat());
+		const rep = (await fixtureChat("Independence fixture", [user("u1", "rep")].flat()));
 		const findings: SessionFindings = {
 			propositions: [
 				{ id: "p1", name: "Rep one", statement: "Independence one statement", aliases: [] },
@@ -376,19 +377,19 @@ describe("the merger (mergeFindings)", () => {
 			],
 			chains: [{ premises: ["p1"], conclusion: "p2" }],
 		};
-		const first = mergeFindings(rep.id, findings, { links: [] }, graphDeps, sessionSource(rep.id));
+		const first = (await mergeFindings(rep.id, findings, { links: [] }, graphDeps, (await sessionSource(rep.id))));
 		assert.deepEqual(first, { nodes: 2, chains: 1 });
-		const second = mergeFindings(rep.id, findings, { links: [] }, graphDeps, sessionSource(rep.id));
+		const second = (await mergeFindings(rep.id, findings, { links: [] }, graphDeps, (await sessionSource(rep.id))));
 		assert.deepEqual(second, { nodes: 2, chains: 1 }, "nothing remembered — everything re-creates");
-		const graph = scopedGraph([rep.id]);
+		const graph = (await scopedGraph([rep.id]));
 		assert.equal(graph.nodes.length, 4, "the propositions merge again as fresh nodes");
 		assert.equal(graph.chains.length, 2, "fresh endpoints — fresh chain assertions");
 		// exactly one checkpoint line per merge, though — checkpoints are a log
-		assert.equal(graphStore.readCheckpoints().filter((c) => c.chatId === rep.id).length, 2);
+		assert.equal((await graphStore.readCheckpoints()).filter((c) => c.chatId === rep.id).length, 2);
 	});
 
-	it("is idempotent WITHIN one submit — a repeated proposition id resolves once", () => {
-		const dup = fixtureChat("Duplicate-id fixture", [user("u1", "dup")].flat());
+	it("is idempotent WITHIN one submit — a repeated proposition id resolves once", async () => {
+		const dup = (await fixtureChat("Duplicate-id fixture", [user("u1", "dup")].flat()));
 		const findings: SessionFindings = {
 			propositions: [
 				{ id: "p1", name: "Dup", statement: "Dup statement", aliases: [] },
@@ -396,13 +397,13 @@ describe("the merger (mergeFindings)", () => {
 			],
 			chains: [],
 		};
-		const stats = mergeFindings(dup.id, findings, { links: [] }, graphDeps, sessionSource(dup.id));
+		const stats = (await mergeFindings(dup.id, findings, { links: [] }, graphDeps, (await sessionSource(dup.id))));
 		assert.deepEqual(stats, { nodes: 1, chains: 0 }, "the duplicate id is skipped — first resolution stands");
 	});
 
-	it("applies a linkTo verdict: phrasings join aliases, provenance unions, no duplicate node", () => {
-		const alphaId = scopedGraph([chat1.id]).nodes.find((n) => n.statement === "Alpha intuition")!.id;
-		const chat2 = fixtureChat("Graph fixture 2", [
+	it("applies a linkTo verdict: phrasings join aliases, provenance unions, no duplicate node", async () => {
+		const alphaId = (await scopedGraph([chat1.id])).nodes.find((n) => n.statement === "Alpha intuition")!.id;
+		const chat2 = (await fixtureChat("Graph fixture 2", [
 			user("u1", "again"),
 			assistant("a1", [
 				quizPart(
@@ -411,11 +412,11 @@ describe("the merger (mergeFindings)", () => {
 					answer({ questionText: "Q9 text", correct: true, answeredAt: "2026-08-22T03:00:00.000Z" }),
 				),
 			]),
-		].flat());
+		].flat()));
 		chat2Id = chat2.id;
 
 		// The auditor's identity verdict: this proposition IS the alpha node.
-		const stats = mergeFindings(
+		const stats = (await mergeFindings(
 			chat2.id,
 			{
 				propositions: [
@@ -432,13 +433,13 @@ describe("the merger (mergeFindings)", () => {
 			// on the proposition (owner, 2026-09-28).
 			{ links: [{ id: "q1", linkTo: alphaId }] },
 			graphDeps,
-			sessionSource(chat2.id),
-		);
+			(await sessionSource(chat2.id)),
+		));
 		assert.deepEqual(stats, { nodes: 0, chains: 0 });
 
-		const after = scopedGraph([chat1.id, chat2.id]);
+		const after = (await scopedGraph([chat1.id, chat2.id]));
 		assert.equal(after.nodes.length, 3, "no duplicate node");
-		const alpha = getGraph(graphStore).nodes.find((n) => n.id === alphaId)!;
+		const alpha = (await getGraph(graphStore)).nodes.find((n) => n.id === alphaId)!;
 		assert.ok(alpha.aliases.includes("Alpha feel"), "the session's phrasing joins the aliases");
 		assert.ok(alpha.aliases.includes("alpha intuition"));
 		assert.ok(
@@ -447,12 +448,12 @@ describe("the merger (mergeFindings)", () => {
 		);
 	});
 
-	it("resolves imported-notes ids to their file paths in the snapshot (static provenance)", () => {
+	it("resolves imported-notes ids to their file paths in the snapshot (static provenance)", async () => {
 		// The notes front door in miniature: a source record + a merge under
 		// its src id — the snapshot must label it with the file path (a
 		// static entry), never as a chat session.
-		graphStore.upsertSource({ id: "src_snapfixture", filePath: "/vault/learn vim.md", importedAt: "2026-09-13T00:00:00.000Z" });
-		mergeFindings(
+		(await graphStore.upsertSource({ id: "src_snapfixture", filePath: "/vault/learn vim.md", importedAt: "2026-09-13T00:00:00.000Z" }));
+		(await mergeFindings(
 			"src_snapfixture",
 			{
 				propositions: [
@@ -468,22 +469,22 @@ describe("the merger (mergeFindings)", () => {
 			{ links: [] },
 			graphDeps,
 			{ foldedAt: "2026-09-13T00:00:00.000Z" },
-		);
-		const snap = graphSnapshot(graphDeps);
+		));
+		const snap = (await graphSnapshot(graphDeps));
 		const node = snap.nodes.find((n) => n.statement === "Vim registers map single keys to editing commands.")!;
 		assert.equal(snap.fileSources["src_snapfixture"], "/vault/learn vim.md");
 		assert.deepEqual(snap.nodeSessions[node.id], ["src_snapfixture"], "the file entry joins the node's sessions list");
 		assert.equal(snap.sessions["src_snapfixture"], undefined, "a notes source is never a chat session");
 	});
 
-	it("derives BIRTH-SESSION clusters in graphSnapshot, labeled with the session's name", () => {
+	it("derives BIRTH-SESSION clusters in graphSnapshot, labeled with the session's name", async () => {
 		// Wave 7 (owner-locked 2026-09-23): embeddings are dead — a cluster is
 		// the session that BIRTHED its propositions, derived on read from
 		// provenance. No ledger partition to play, no LLM naming pass — the
 		// label IS the session's name (chat title / file path).
 		const tri = ["Alpha.", "Beta.", "Gamma cluster."] as const;
-		graphStore.upsertSource({ id: "src_clusterfixture", filePath: "/vault/cluster notes.md", importedAt: "2026-09-13T00:00:00.000Z" });
-		const merge = mergeFindings(
+		(await graphStore.upsertSource({ id: "src_clusterfixture", filePath: "/vault/cluster notes.md", importedAt: "2026-09-13T00:00:00.000Z" }));
+		const merge = (await mergeFindings(
 			"src_clusterfixture",
 			{
 				propositions: tri.map((statement, i) => ({
@@ -500,9 +501,9 @@ describe("the merger (mergeFindings)", () => {
 			{ links: [] },
 			graphDeps,
 			{ foldedAt: "2026-09-13T00:00:00.000Z" },
-		);
+		));
 		assert.equal(merge.nodes, 3);
-		const snap = graphSnapshot(graphDeps);
+		const snap = (await graphSnapshot(graphDeps));
 		// Presentation threshold: every cluster is >= 3 members.
 		assert.ok(snap.clusters.every((c) => c.members.length >= 3));
 		// Our trio is exactly one cluster — the notes file that BIRTHED it,
@@ -519,7 +520,7 @@ describe("the merger (mergeFindings)", () => {
 		// (2026-09-30), only MULTI-premise live chains mint imp nodes
 		// (this fixture's two single-premise chains collapse to direct
 		// arrows — zero imp nodes here).
-		const stored = graphStore.readChains();
+		const stored = (await graphStore.readChains());
 		const live = new Set(snap.propositions.map((n) => n.id));
 		const impChains = stored.filter(
 			(c) => c.premises.length >= 2 && live.has(c.conclusion) && c.premises.every((p) => live.has(p)),
@@ -531,8 +532,8 @@ describe("the merger (mergeFindings)", () => {
 		assert.equal(imp.length, 0, "this fixture's chains are single-premise — all collapsed to direct arrows");
 	});
 
-	it("derives the sessions index in graphSnapshot", () => {
-		const snap = graphSnapshot(graphDeps);
+	it("derives the sessions index in graphSnapshot", async () => {
+		const snap = (await graphSnapshot(graphDeps));
 		const idByStatement = new Map(snap.nodes.map((n) => [n.statement, n.id]));
 		// No node-state classes (2026-09-08) and no understanding
 		// observations (2026-09-27 cleanup): the snapshot carries only the
@@ -550,10 +551,10 @@ describe("the merger (mergeFindings)", () => {
 		assert.deepEqual(snap.nodeSessions[idByStatement.get("Gamma application")!], [chat1.id]);
 	});
 
-	it("never string-matches without a verdict — an identical statement without linkTo is a NEW node", () => {
-		const chat3 = fixtureChat("Graph fixture 3", [user("u1", "third")].flat());
+	it("never string-matches without a verdict — an identical statement without linkTo is a NEW node", async () => {
+		const chat3 = (await fixtureChat("Graph fixture 3", [user("u1", "third")].flat()));
 		chat3Id = chat3.id;
-		const stats = mergeFindings(
+		const stats = (await mergeFindings(
 			chat3.id,
 			{
 				propositions: [
@@ -569,16 +570,16 @@ describe("the merger (mergeFindings)", () => {
 			// empty verdicts — identity is the auditor's call alone
 			{ links: [] },
 			graphDeps,
-			sessionSource(chat3.id),
-		);
+			(await sessionSource(chat3.id)),
+		));
 		assert.equal(stats.nodes, 1, "created — the merger does not match strings");
-		assert.equal(getGraph(graphStore).nodes.filter((n) => n.statement === "Alpha intuition").length, 2);
+		assert.equal((await getGraph(graphStore)).nodes.filter((n) => n.statement === "Alpha intuition").length, 2);
 	});
 
-	it("merges the notes front door: source id as chatId, checkpoint at import time", () => {
+	it("merges the notes front door: source id as chatId, checkpoint at import time", async () => {
 		// Raw personal notes carry no transcript — no message anchors; the
 		// file is the provenance (and no events exist to build, 2026-09-27).
-		const stats = mergeFindings(
+		const stats = (await mergeFindings(
 			"src_notesfixture",
 			{
 				propositions: [
@@ -594,13 +595,13 @@ describe("the merger (mergeFindings)", () => {
 			{ links: [] },
 			graphDeps,
 			{ foldedAt: "2026-09-13T00:00:00.000Z" },
-		);
+		));
 		assert.deepEqual(stats, { nodes: 1, chains: 0 });
 
-		const node = getGraph(graphStore).nodes.find((n) => n.statement.startsWith("Vim starts"))!;
+		const node = (await getGraph(graphStore)).nodes.find((n) => n.statement.startsWith("Vim starts"))!;
 		assert.deepEqual(node.provenance, [{ chatId: "src_notesfixture", messageId: "" }], "one chat-level point — the source key, no message anchors");
 		// The checkpoint stamps the import time.
-		assert.equal(graphStore.readCheckpoints().find((c) => c.chatId === "src_notesfixture")?.foldedAt, "2026-09-13T00:00:00.000Z");
+		assert.equal((await graphStore.readCheckpoints()).find((c) => c.chatId === "src_notesfixture")?.foldedAt, "2026-09-13T00:00:00.000Z");
 	});
 });
 
@@ -608,7 +609,7 @@ describe("the merger (mergeFindings)", () => {
 // ─── store primitives ────────────────────────────────────────────────────────
 
 describe("graph ledger store", () => {
-	it("round-trips lines and skips corrupt / foreign-shaped lines (strict reads)", () => {
+	it("round-trips lines and skips corrupt / foreign-shaped lines (strict reads)", async () => {
 		const node = {
 			id: "n_storetest",
 			name: "Store test",
@@ -617,7 +618,7 @@ describe("graph ledger store", () => {
 			createdAt: "2026-08-22T00:00:00.000Z",
 			provenance: [{ chatId: "chat_c", messageId: "m1" }],
 		};
-		graphStore.appendNode(node);
+		(await graphStore.appendNode(node));
 		// A torn append and a pre-name-pivot node (old schema: description, no
 		// name) — both skipped by the strict guard.
 		fs.appendFileSync(
@@ -625,7 +626,7 @@ describe("graph ledger store", () => {
 			`{not json}\n${JSON.stringify({ id: "legacy", statement: "Legacy shape", description: "Old schema.", aliases: [], createdAt: "2026-08-22T00:00:00.000Z", provenance: [] })}\n`,
 			"utf-8",
 		);
-		const nodes = graphStore.readNodes().filter((n) => n.id === "n_storetest" || n.id === "legacy");
+		const nodes = (await graphStore.readNodes()).filter((n) => n.id === "n_storetest" || n.id === "legacy");
 		assert.equal(nodes.length, 1);
 		assert.equal(nodes[0]!.name, "Store test");
 		assert.equal(nodes[0]!.statement, "Store test, elaborated.");
@@ -633,7 +634,7 @@ describe("graph ledger store", () => {
 	});
 
 
-	it("returns RAW node lines — repeated ids (link-appends) are each their own line; getGraph merges", () => {
+	it("returns RAW node lines — repeated ids (link-appends) are each their own line; getGraph merges", async () => {
 		const line = (msgId: string) =>
 			JSON.stringify({
 				id: "n_linktest",
@@ -644,9 +645,9 @@ describe("graph ledger store", () => {
 				provenance: [{ chatId: "chat_c", messageId: msgId }],
 			});
 		fs.appendFileSync(LEDGER_FILES.nodes, `${line("m1")}\n${line("m2")}\n`, "utf-8");
-		const lines = graphStore.readNodes().filter((n) => n.id === "n_linktest");
+		const lines = (await graphStore.readNodes()).filter((n) => n.id === "n_linktest");
 		assert.equal(lines.length, 2, "the store returns raw lines, one per append");
-		const merged = getGraph(graphStore).nodes.find((n) => n.id === "n_linktest")!;
+		const merged = (await getGraph(graphStore)).nodes.find((n) => n.id === "n_linktest")!;
 		assert.equal(merged.statement, "Phrasing m1", "the FIRST line defines the node");
 		assert.ok(merged.aliases.includes("Phrasing m2"), "later phrasings join the aliases");
 		assert.deepEqual(merged.provenance.map((p) => p.messageId), ["m1", "m2"]);
@@ -655,13 +656,12 @@ describe("graph ledger store", () => {
 
 // ─── session deletion (wave 6 — the first destructive ledger operation) ─────
 
-import { deleteChatTraces, type ChatDeletionStats } from "../src/core/graph-deletion.ts";
-import { deleteChatSession, sessionCoverage } from "../src/server/chats.ts";
+import { type ChatDeletionStats } from "../src/core/graph-deletion.ts";
+import { deleteChatSession, sessionCoverage, recoverChatDeletions } from "../src/server/chats.ts";
 import { rememberTurnFailure, settledTurnResponse } from "../src/server/turn-runs.ts";
 import { beginTurn, endTurn } from "../src/server/turn-liveness.ts";
 import { jobStore } from "../src/store/jobs.ts";
 import {
-	deleteNodeTraces,
 	type NodeDeletionStats,
 } from "../src/core/graph-deletion.ts";
 import { deleteGraphNode, graphRevision } from "../src/server/graph.ts";
@@ -672,8 +672,8 @@ describe("session deletion (deleteChatTraces + deleteChatSession, wave 6)", () =
 	 *  Deleting dA must: keep X (dB's link line survives, dA's create-line
 	 *  aliases stripped — the identity stays), kill Y (orphan), keep Z and
 	 *  dB's edge, kill dA's coverage/checkpoints. */
-	function buildTwoSessionScenario() {
-		const dA = fixtureChat("Deletion session A", [
+	async function buildTwoSessionScenario() {
+		const dA = (await fixtureChat("Deletion session A", [
 			user("du1", "teach me the deletion topic"),
 			assistant("da1", [
 				quizPart(
@@ -682,7 +682,7 @@ describe("session deletion (deleteChatTraces + deleteChatSession, wave 6)", () =
 					answer({ questionText: "DQ1 text", correct: true, answeredAt: "2026-09-23T00:00:00.000Z" }),
 				),
 			]),
-		].flat());
+		].flat()));
 		const findingsA: SessionFindings = {
 			propositions: [
 				{ id: "p1", name: "Shared core", statement: "Shared core statement", aliases: ["shared feel"], },
@@ -690,15 +690,15 @@ describe("session deletion (deleteChatTraces + deleteChatSession, wave 6)", () =
 			],
 			chains: [{ premises: ["p1"], conclusion: "p2", }],
 		};
-		mergeFindings(dA.id, findingsA, { links: [] }, graphDeps, sessionSource(dA.id));
+		(await mergeFindings(dA.id, findingsA, { links: [] }, graphDeps, (await sessionSource(dA.id))));
 		// Resolve through THIS session's provenance — the shared ledger
 		// holds lookalike statements from earlier tests, so scope by chat.
-		const bornOf = (chatId: string, statement: string): string =>
-			getGraph(graphStore).nodes.find((n) => n.statement === statement && n.provenance.some((pt) => pt.chatId === chatId))!.id;
-		const xId = bornOf(dA.id, "Shared core statement");
-		const yId = bornOf(dA.id, "Solo fact statement");
+		const bornOf = async (chatId: string, statement: string): Promise<string> =>
+			(await getGraph(graphStore)).nodes.find((n) => n.statement === statement && n.provenance.some((pt) => pt.chatId === chatId))!.id;
+		const xId = (await bornOf(dA.id, "Shared core statement"));
+		const yId = (await bornOf(dA.id, "Solo fact statement"));
 
-		const dB = fixtureChat("Deletion session B", [
+		const dB = (await fixtureChat("Deletion session B", [
 			user("eu1", "more on the shared core"),
 			assistant("eb1", [
 				quizPart(
@@ -707,7 +707,7 @@ describe("session deletion (deleteChatTraces + deleteChatSession, wave 6)", () =
 					answer({ questionText: "EQ1 text", correct: false, answeredAt: "2026-09-23T00:01:00.000Z" }),
 				),
 			]),
-		].flat());
+		].flat()));
 		const findingsB: SessionFindings = {
 			propositions: [
 				{ id: "q1", name: "Shared again", statement: "Shared core, rephrased", aliases: ["B phrasing"] },
@@ -715,25 +715,25 @@ describe("session deletion (deleteChatTraces + deleteChatSession, wave 6)", () =
 			],
 			chains: [{ premises: ["q1"], conclusion: "q2", }],
 		};
-		mergeFindings(dB.id, findingsB, { links: [{ id: "q1", linkTo: xId }] }, graphDeps, sessionSource(dB.id));
-		const zId = bornOf(dB.id, "B extra statement");
+		(await mergeFindings(dB.id, findingsB, { links: [{ id: "q1", linkTo: xId }] }, graphDeps, (await sessionSource(dB.id))));
+		const zId = (await bornOf(dB.id, "B extra statement"));
 
 		// Coverage rows (both chats) + positions garnish — the deletion
 		// prunes both ledgers.
 		for (const chat of [dA, dB]) {
 			for (let i = 0; i < 2; i++) {
-				graphStore.appendCoverage({ chatId: chat.id, fp: `${chat.id}-${i}`, tokens: 10, foldedAt: "2026-09-23T00:02:00.000Z" });
+				(await graphStore.appendCoverage({ chatId: chat.id, fp: `${chat.id}-${i}`, tokens: 10, foldedAt: "2026-09-23T00:02:00.000Z" }));
 			}
 		}
-		graphStore.writePositions({ ...graphStore.readPositions(), [xId]: { x: 1, y: 1 }, [yId]: { x: 2, y: 2 }, [zId]: { x: 3, y: 3 } });
+		(await graphStore.writePositions({ ...(await graphStore.readPositions()), [xId]: { x: 1, y: 1 }, [yId]: { x: 2, y: 2 }, [zId]: { x: 3, y: 3 } }));
 		return { dA, dB, xId, yId, zId };
 	}
 
-	it("delete-nodes: the shared node survives with the other session's content; the orphan dies; the creator's aliases are stripped (owner ruling 2026-09-23)", () => {
-		const { dA, dB, xId, yId, zId } = buildTwoSessionScenario();
-		const zLineBefore = JSON.stringify(graphStore.readNodes().find((n) => n.id === zId));
+	it("delete-nodes: the shared node survives with the other session's content; the orphan dies; the creator's aliases are stripped (owner ruling 2026-09-23)", async () => {
+		const { dA, dB, xId, yId, zId } = (await buildTwoSessionScenario());
+		const zLineBefore = JSON.stringify((await graphStore.readNodes()).find((n) => n.id === zId));
 
-		const stats = deleteChatTraces(graphStore, dA.id, "delete-nodes");
+		const stats = (await deleteChatTraces(graphStore, dA.id, "delete-nodes"));
 		assert.deepEqual(stats, {
 			nodesRemoved: 1,
 			chainsRemoved: 1,
@@ -741,7 +741,7 @@ describe("session deletion (deleteChatTraces + deleteChatSession, wave 6)", () =
 			checkpointsRemoved: 1,
 		} satisfies ChatDeletionStats);
 
-		const graph = getGraph(graphStore);
+		const graph = (await getGraph(graphStore));
 		// X survives: identity (name/statement/createdAt from the create
 		// line) intact, dA's aliases + provenance gone, dB's phrasings in.
 		const x = graph.nodes.find((n) => n.id === xId)!;
@@ -752,61 +752,61 @@ describe("session deletion (deleteChatTraces + deleteChatSession, wave 6)", () =
 		assert.deepEqual(x.provenance, [{ chatId: dB.id, messageId: "" }], "only dB's provenance remains");
 		// Y (the orphan) is gone entirely.
 		assert.equal(graph.nodes.some((n) => n.id === yId), false);
-		assert.equal(graphStore.readNodes().some((n) => n.id === yId), false);
+		assert.equal((await graphStore.readNodes()).some((n) => n.id === yId), false);
 		// Z (dB-only) is untouched, byte-identical.
-		assert.equal(JSON.stringify(graphStore.readNodes().find((n) => n.id === zId)), zLineBefore);
+		assert.equal(JSON.stringify((await graphStore.readNodes()).find((n) => n.id === zId)), zLineBefore);
 		// Chains: dA's argument X⇒Y died (Y died); dB's X⇒Z survived.
-		const scoped = scopedGraph([dA.id, dB.id]);
+		const scoped = (await scopedGraph([dA.id, dB.id]));
 		assert.equal(scoped.chains.length, 1);
 		assert.deepEqual(scoped.chains[0]!.premises, [xId]);
 		assert.equal(scoped.chains[0]!.conclusion, zId);
 		assert.deepEqual(scoped.chains[0]!.provenance, [{ chatId: dB.id, messageId: "" }]);
 		// Positions: the orphan pruned.
-		const positions = graphStore.readPositions();
+		const positions = (await graphStore.readPositions());
 		assert.equal(positions[yId], undefined);
 		assert.deepEqual(positions[xId], { x: 1, y: 1 });
 		// The snapshot resolves X to dB only — the deleted chat left no ghost.
-		const snapshot = graphSnapshot(graphDeps);
+		const snapshot = (await graphSnapshot(graphDeps));
 		assert.deepEqual(snapshot.nodeSessions[xId], [dB.id]);
 		assert.ok(snapshot.sessions[dB.id] && !snapshot.sessions[dA.id]);
 		// Atomic rewrites left no temp files, and appends still work.
 		assert.equal(fs.readdirSync(PATHS.graph).filter((f) => f.includes(".tmp-")).length, 0);
-		const nodesBefore = graphStore.readNodes().length;
+		const nodesBefore = (await graphStore.readNodes()).length;
 		// Foreign provenance: the probe is another chat's data, so later
 		// deletions must leave it untouched (the foreign-data doctrine).
-		graphStore.appendNode({ id: "n_del_append_probe", name: "Probe", statement: "Probe statement", aliases: [], createdAt: "2026-09-23T00:04:00.000Z", provenance: [{ chatId: "chat_foreign_probe", messageId: "" }] });
-		assert.equal(graphStore.readNodes().length, nodesBefore + 1);
+		(await graphStore.appendNode({ id: "n_del_append_probe", name: "Probe", statement: "Probe statement", aliases: [], createdAt: "2026-09-23T00:04:00.000Z", provenance: [{ chatId: "chat_foreign_probe", messageId: "" }] }));
+		assert.equal((await graphStore.readNodes()).length, nodesBefore + 1);
 		// Idempotent: a second run finds nothing.
-		assert.deepEqual(deleteChatTraces(graphStore, dA.id, "delete-nodes"), { ...stats, nodesRemoved: 0, chainsRemoved: 0, coverageRemoved: 0, checkpointsRemoved: 0 } satisfies ChatDeletionStats);
+		assert.deepEqual((await deleteChatTraces(graphStore, dA.id, "delete-nodes")), { ...stats, nodesRemoved: 0, chainsRemoved: 0, coverageRemoved: 0, checkpointsRemoved: 0 } satisfies ChatDeletionStats);
 	});
 
-	it("preserve-graph: only the extraction bookkeeping dies — the graph ledgers are byte-identical", () => {
-		const { dA, dB, xId, yId, zId } = buildTwoSessionScenario();
+	it("preserve-graph: only the extraction bookkeeping dies — the graph ledgers are byte-identical", async () => {
+		const { dA, dB, xId, yId, zId } = (await buildTwoSessionScenario());
 		const before = {
-			nodes: graphStore.readNodes(),
-			chains: graphStore.readChains(),
-			positions: graphStore.readPositions(),
+			nodes: (await graphStore.readNodes()),
+			chains: (await graphStore.readChains()),
+			positions: (await graphStore.readPositions()),
 		};
-		const stats = deleteChatTraces(graphStore, dA.id, "preserve-graph");
+		const stats = (await deleteChatTraces(graphStore, dA.id, "preserve-graph"));
 		assert.deepEqual(stats, {
 			nodesRemoved: 0,
 			chainsRemoved: 0,
 			coverageRemoved: 2,
 			checkpointsRemoved: 1,
 		} satisfies ChatDeletionStats);
-		assert.deepEqual(graphStore.readNodes(), before.nodes);
-		assert.deepEqual(graphStore.readChains(), before.chains);
-		assert.deepEqual(graphStore.readPositions(), before.positions);
-		assert.equal(graphStore.readCoverage().some((row) => row.chatId === dA.id), false);
-		assert.equal(graphStore.readCoverage().some((row) => row.chatId === dB.id), true);
+		assert.deepEqual((await graphStore.readNodes()), before.nodes);
+		assert.deepEqual((await graphStore.readChains()), before.chains);
+		assert.deepEqual((await graphStore.readPositions()), before.positions);
+		assert.equal((await graphStore.readCoverage()).some((row) => row.chatId === dA.id), false);
+		assert.equal((await graphStore.readCoverage()).some((row) => row.chatId === dB.id), true);
 		void xId; void yId; void zId;
 	});
 
-	it("deleteChatSession: the orchestration's gates and the sync block", async () => {
+	it("deleteChatSession: running-work gates and durable cleanup", async () => {
 		// 404 — unknown chat.
 		assert.deepEqual(await deleteChatSession("chat_missing_delete", "delete-nodes"), { ok: false, status: 404, code: "not_found", error: "No such session" });
 
-		const { dA } = buildTwoSessionScenario();
+		const { dA } = (await buildTwoSessionScenario());
 		// 409 — a turn in flight.
 		beginTurn(dA.id);
 		const turnedAway = await deleteChatSession(dA.id, "delete-nodes");
@@ -814,30 +814,57 @@ describe("session deletion (deleteChatTraces + deleteChatSession, wave 6)", () =
 		endTurn(dA.id);
 		// 409 — running background jobs; a refused delete keeps its notice.
 		rememberTurnFailure(dA.id, "The reply could not be saved.");
-		const job = jobStore.createJob({ kind: "research", chatId: dA.id, toolCallId: "del-call-1" });
+		const job = (await jobStore.createJob({ kind: "research", chatId: dA.id, toolCallId: "del-call-1" }));
 		const jobsBlocked = await deleteChatSession(dA.id, "delete-nodes");
 		assert.ok(!jobsBlocked.ok && jobsBlocked.status === 409, "refused with 409");
 		if (jobsBlocked.code === "jobs_running") assert.deepEqual(jobsBlocked.jobIds, [job.id]);
 		assert.match(await settledTurnResponse(dA.id).text(), /The reply could not be saved\./);
-		assert.equal(jobStore.deleteJobsForChat(dA.id), 1, "test cleanup — the job file is gone");
+		assert.equal((await jobStore.deleteJobsForChat(dA.id)), 1, "test cleanup — the job file is gone");
 
 		// Success — a terminal job rides along; the chat record dies last.
-		const doneJob = jobStore.createJob({ kind: "research", chatId: dA.id, toolCallId: "del-call-2" });
-		jobStore.updateJob(doneJob.id, { status: "done", activity: "delivered" });
+		const doneJob = (await jobStore.createJob({ kind: "research", chatId: dA.id, toolCallId: "del-call-2" }));
+		(await jobStore.updateJob(doneJob.id, { status: "done", activity: "delivered" }));
 		const outcome = await deleteChatSession(dA.id, "delete-nodes");
 		assert.equal(outcome.ok, true);
 		if (outcome.ok) {
 			assert.equal(outcome.mode, "delete-nodes");
 			assert.equal(outcome.stats.nodesRemoved, 1);
 			assert.equal(outcome.jobsRemoved, 1);
-			assert.ok(outcome.graphRevision > 0, "the version stamp moved");
+			assert.ok(outcome.graphRevision !== "0", "the version stamp moved");
 		}
-		assert.equal(chatStore.getChat(dA.id), null, "the chat record is gone");
+		assert.equal((await chatStore.getChat(dA.id)), null, "the chat record is gone");
 		assert.doesNotMatch(await settledTurnResponse(dA.id).text(), /"type":"error"/, "deletion clears its transient notice");
-		assert.equal(jobStore.getJob(doneJob.id), null, "the chat's job records are gone");
+		assert.equal((await jobStore.getJob(doneJob.id)), null, "the chat's job records are gone");
 		// And a second call is an honest 404.
 		assert.deepEqual(await deleteChatSession(dA.id, "delete-nodes"), { ok: false, status: 404, code: "not_found", error: "No such session" });
 	});
+	it("recovers deletion after graph commit without replaying evidence or allowing new messages", async () => {
+		const { dA, dB, xId, yId } = await buildTwoSessionScenario();
+		const { stores } = await import("../src/server/stores.ts");
+		const originalDelete = stores.readingSourceStore.delete;
+		stores.readingSourceStore.delete = async () => { throw new Error("injected archive cleanup interruption"); };
+		try {
+			await assert.rejects(deleteChatSession(dA.id, "delete-nodes"), /archive cleanup interruption/);
+		} finally {
+			stores.readingSourceStore.delete = originalDelete;
+		}
+		const pending = await chatStore.getChat(dA.id);
+		assert.equal(pending?.deleting?.mode, "delete-nodes");
+		assert.ok(!(await chatStore.listChats()).some((chat) => chat.id === dA.id));
+		await assert.rejects(chatStore.appendMessages(dA.id, user("late-input", "must not resurrect")), /delet/i);
+		const committedRevision = await graphRevision();
+		await recoverChatDeletions();
+		assert.equal(await chatStore.getChat(dA.id), null);
+		assert.equal(await graphRevision(), committedRevision, "existing deletion receipt is reused");
+		const graph = await getGraph(graphStore);
+		assert.equal(graph.nodes.some((node) => node.id === yId), false);
+		const shared = graph.nodes.find((node) => node.id === xId)!;
+		assert.ok(shared.provenance.some((point) => point.chatId === dB.id));
+		assert.ok(!shared.provenance.some((point) => point.chatId === dA.id));
+		await recoverChatDeletions();
+		assert.equal(await graphRevision(), committedRevision, "repeated recovery has no graph write");
+	});
+
 });
 
 // ─── single-node deletion (node interlude, full death) ───────────────────────
@@ -847,69 +874,69 @@ describe("single-node deletion (deleteNodeTraces + deleteGraphNode, node interlu
 	 *  provenance — a legacy line; the mappings anchor is gone, owner
 	 *  2026-09-29), re-encountered by a chat (link line: alias +
 	 *  provenance), and asserted in chains by two sessions. */
-	function buildNodeScenario() {
+	async function buildNodeScenario() {
 		// Clean slate per test: each test in this describe builds its own
 		// scenario from empty ledgers (the suite's isolation covers the
 		// whole file; this covers describe-internal stacking).
-		graphStore.rewriteLedgers({ nodes: [], chains: [] });
-		graphStore.writePositions({});
-		graphStore.appendNode({
+		(await graphStore.rewriteLedgers({ nodes: [], chains: [] }));
+		(await graphStore.writePositions({}));
+		(await graphStore.appendNode({
 			id: "n_dead",
 			name: "Doomed",
 			statement: "Doomed statement",
 			aliases: [],
 			createdAt: "2026-09-23T00:00:00.000Z",
 			provenance: [],
-		});
+		}));
 		// The chat's re-encounter: a link line (alias + its own provenance).
-		graphStore.appendNode({
+		(await graphStore.appendNode({
 			id: "n_dead",
 			name: "Doomed",
 			statement: "Doomed statement",
 			aliases: ["doomed, rephrased"],
 			createdAt: "2026-09-23T00:00:00.000Z",
 			provenance: [{ chatId: "chat_node_a", messageId: "m1" }],
-		});
+		}));
 		// A neighbor + two edges: only the one touching X dies.
-		graphStore.appendNode({
+		(await graphStore.appendNode({
 			id: "n_keep",
 			name: "Keeper",
 			statement: "Keeper statement",
 			aliases: [],
 			createdAt: "2026-09-23T00:00:00.000Z",
 			provenance: [{ chatId: "chat_node_a", messageId: "m2" }],
-		});
-		graphStore.appendChain({ id: "arg_dead_keep", premises: ["n_dead"], conclusion: "n_keep", createdAt: "2026-09-23T00:00:00.000Z", provenance: [{ chatId: "chat_node_a", messageId: "m1" }] });
-		graphStore.appendChain({ id: "arg_keep_dead", premises: ["n_keep"], conclusion: "n_dead", createdAt: "2026-09-23T00:00:00.000Z", provenance: [{ chatId: "chat_node_b", messageId: "m3" }] });
+		}));
+		(await graphStore.appendChain({ id: "arg_dead_keep", premises: ["n_dead"], conclusion: "n_keep", createdAt: "2026-09-23T00:00:00.000Z", provenance: [{ chatId: "chat_node_a", messageId: "m1" }] }));
+		(await graphStore.appendChain({ id: "arg_keep_dead", premises: ["n_keep"], conclusion: "n_dead", createdAt: "2026-09-23T00:00:00.000Z", provenance: [{ chatId: "chat_node_b", messageId: "m3" }] }));
 		// A FOREIGN chain the deletion must not touch (destructive rewriting
 		// may not exceed the blast radius — foreign data rides untouched).
-		graphStore.appendChain({ id: "arg_keep_other", premises: ["n_keep"], conclusion: "n_other", createdAt: "2026-09-23T00:00:00.000Z", provenance: [{ chatId: "chat_node_b", messageId: "m3" }] });
+		(await graphStore.appendChain({ id: "arg_keep_other", premises: ["n_keep"], conclusion: "n_other", createdAt: "2026-09-23T00:00:00.000Z", provenance: [{ chatId: "chat_node_b", messageId: "m3" }] }));
 		// Resting positions for both nodes and both dying chains' imp nodes.
-		graphStore.writePositions({ n_dead: { x: 1, y: 1 }, n_keep: { x: 2, y: 2 }, arg_dead_keep: { x: 1.5, y: 1.5 }, arg_keep_dead: { x: 2.5, y: 2.5 } });
+		(await graphStore.writePositions({ n_dead: { x: 1, y: 1 }, n_keep: { x: 2, y: 2 }, arg_dead_keep: { x: 1.5, y: 1.5 }, arg_keep_dead: { x: 2.5, y: 2.5 } }));
 	}
 
-	it("deleteNodeTraces: FULL DEATH — the node, its edges, its evidence, its anchors, its position", () => {
-		buildNodeScenario();
-		const keepLineBefore = JSON.stringify(graphStore.readNodes().find((n) => n.id === "n_keep"));
-		const stats = deleteNodeTraces(graphStore, "n_dead");
+	it("deleteNodeTraces: FULL DEATH — the node, its edges, its evidence, its anchors, its position", async () => {
+		(await buildNodeScenario());
+		const keepLineBefore = JSON.stringify((await graphStore.readNodes()).find((n) => n.id === "n_keep"));
+		const stats = (await deleteNodeTraces(graphStore, "n_dead"));
 		assert.deepEqual(stats, { chainsRemoved: 2 } satisfies NodeDeletionStats);
 
 		// The node's EVERY line is gone; the neighbor is byte-identical
 		// (full death is node-scoped — other nodes' sessions keep their
 		// aliases and provenance).
-		assert.equal(graphStore.readNodes().some((n) => n.id === "n_dead"), false);
+		assert.equal((await graphStore.readNodes()).some((n) => n.id === "n_dead"), false);
 		assert.equal(
-			JSON.stringify(graphStore.readNodes().find((n) => n.id === "n_keep")),
+			JSON.stringify((await graphStore.readNodes()).find((n) => n.id === "n_keep")),
 			keepLineBefore,
 			"the untouched node is byte-identical",
 		);
 		// Only the chains referencing X died; the foreign chain stays.
 		assert.deepEqual(
-			graphStore.readChains().map((c) => [c.premises, c.conclusion]),
+			(await graphStore.readChains()).map((c) => [c.premises, c.conclusion]),
 			[[["n_keep"], "n_other"]],
 		);
 		// The resting position died with the node.
-		const positions = graphStore.readPositions();
+		const positions = (await graphStore.readPositions());
 		assert.equal(positions["n_dead"], undefined);
 		assert.deepEqual(positions["n_keep"], { x: 2, y: 2 });
 		assert.equal(positions["arg_dead_keep"], undefined, "the dying chains' imp-node positions die too");
@@ -917,26 +944,26 @@ describe("single-node deletion (deleteNodeTraces + deleteGraphNode, node interlu
 		// Atomic rewrites left no temp files.
 		assert.equal(fs.readdirSync(PATHS.graph).filter((f) => f.includes(".tmp-")).length, 0);
 		// Idempotent: a second run finds no node — null.
-		assert.equal(deleteNodeTraces(graphStore, "n_dead"), null);
+		assert.equal((await deleteNodeTraces(graphStore, "n_dead")), null);
 	});
 
-	it("deleteNodeTraces: a node nothing references still dies, and only its file moves", () => {
-		graphStore.appendNode({
+	it("deleteNodeTraces: a node nothing references still dies, and only its file moves", async () => {
+		(await graphStore.appendNode({
 			id: "n_solo",
 			name: "Solo",
 			statement: "Solo statement",
 			aliases: [],
 			createdAt: "2026-09-23T00:00:00.000Z",
 			provenance: [{ chatId: "chat_node_solo", messageId: "m1" }],
-		});
-		const stats = deleteNodeTraces(graphStore, "n_solo");
+		}));
+		const stats = (await deleteNodeTraces(graphStore, "n_solo"));
 		assert.deepEqual(stats, { chainsRemoved: 0 } satisfies NodeDeletionStats);
-		assert.equal(graphStore.readNodes().some((n) => n.id === "n_solo"), false);
+		assert.equal((await graphStore.readNodes()).some((n) => n.id === "n_solo"), false);
 	});
 
-	it("deleteGraphNode: the orchestration — extraction gate, 404, success", () => {
+	it("deleteGraphNode: the orchestration — extraction gate, 404, success", async () => {
 		// 404 — unknown node.
-		assert.deepEqual(deleteGraphNode("n_missing_node"), {
+		assert.deepEqual((await deleteGraphNode("n_missing_node")), {
 			ok: false,
 			status: 404,
 			code: "not_found",
@@ -958,7 +985,7 @@ describe("single-node deletion (deleteNodeTraces + deleteGraphNode, node interlu
 			lastStartedAt: 0,
 		};
 		try {
-			assert.deepEqual(deleteGraphNode("n_gate_probe"), {
+			assert.deepEqual((await deleteGraphNode("n_gate_probe")), {
 				ok: false,
 				status: 409,
 				code: "extraction_running",
@@ -969,37 +996,37 @@ describe("single-node deletion (deleteNodeTraces + deleteGraphNode, node interlu
 		}
 
 		// Success — the node dies, the version stamp moves.
-		graphStore.appendNode({
+		(await graphStore.appendNode({
 			id: "n_orch",
 			name: "Orchestrated",
 			statement: "Orchestrated statement",
 			aliases: [],
 			createdAt: "2026-09-23T00:00:00.000Z",
 			provenance: [{ chatId: "chat_node_c", messageId: "m1" }],
-		});
-		const revisionBefore = graphRevision();
-		const outcome = deleteGraphNode("n_orch");
+		}));
+		const revisionBefore = (await graphRevision());
+		const outcome = (await deleteGraphNode("n_orch"));
 		assert.ok(outcome.ok);
 		assert.deepEqual(outcome.stats, { chainsRemoved: 0 });
-		assert.ok(outcome.graphRevision > 0);
-		assert.ok(outcome.graphRevision >= revisionBefore, "the version stamp moved");
-		assert.equal(graphStore.readNodes().some((n) => n.id === "n_orch"), false);
+		assert.ok(outcome.graphRevision !== "0");
+		assert.ok(outcome.graphRevision !== revisionBefore, "the version stamp moved");
+		assert.equal((await graphStore.readNodes()).some((n) => n.id === "n_orch"), false);
 		// And a second call is an honest 404.
-		assert.deepEqual(deleteGraphNode("n_orch"), { ok: false, status: 404, code: "not_found", error: "No such node" });
+		assert.deepEqual((await deleteGraphNode("n_orch")), { ok: false, status: 404, code: "not_found", error: "No such node" });
 	});
 });
 
 describe("session coverage read (extraction-UX redesign, 2026-09-24)", () => {
-	it("one session's block: derived uncovered, the newest fold, honest nulls", () => {
+	it("one session's block: derived uncovered, the newest fold, honest nulls", async () => {
 		// Empty coverage: everything uncovered, no fold yet, not running.
 		// Teacher prose only (owner, 2026-09-28): coverage slots are the
 		// teacher's text blocks, so the fixture is all-teacher.
-		const chat = fixtureChat("coverage read", [
+		const chat = (await fixtureChat("coverage read", [
 			teacher("cov_t1", "tell me about coverage reads"),
 			teacher("cov_t2", "and about per-session blocks"),
 			teacher("cov_t3", "a third distinct message"),
-		].flat());
-		const empty = sessionCoverage(chat.id)!;
+		].flat()));
+		const empty = (await sessionCoverage(chat.id))!;
 		assert.ok(empty);
 		assert.equal(empty.totalMessages, 3);
 		assert.equal(empty.coveredCount, 0);
@@ -1011,13 +1038,13 @@ describe("session coverage read (extraction-UX redesign, 2026-09-24)", () => {
 
 		// Fold the first two messages: the read derives the split + the
 		// newest fold timestamp from the ledger rows.
-		const slots = coverageSlots(chatStore.getChat(chat.id)!.messages);
-		graphStore.appendCoverage({ chatId: chat.id, fp: slots[0]!.fp, tokens: slots[0]!.tokens, foldedAt: "2026-09-24T10:00:00.000Z" });
-		graphStore.appendCoverage({ chatId: chat.id, fp: slots[1]!.fp, tokens: slots[1]!.tokens, foldedAt: "2026-09-24T11:30:00.000Z" });
+		const slots = coverageSlots((await chatStore.getChat(chat.id))!.messages);
+		(await graphStore.appendCoverage({ chatId: chat.id, fp: slots[0]!.fp, tokens: slots[0]!.tokens, foldedAt: "2026-09-24T10:00:00.000Z" }));
+		(await graphStore.appendCoverage({ chatId: chat.id, fp: slots[1]!.fp, tokens: slots[1]!.tokens, foldedAt: "2026-09-24T11:30:00.000Z" }));
 		// Another session's row must not leak into this read.
-		graphStore.appendCoverage({ chatId: "chat_other", fp: slots[2]!.fp, tokens: slots[2]!.tokens, foldedAt: "2026-09-24T23:00:00.000Z" });
+		(await graphStore.appendCoverage({ chatId: "chat_other", fp: slots[2]!.fp, tokens: slots[2]!.tokens, foldedAt: "2026-09-24T23:00:00.000Z" }));
 
-		const cov = sessionCoverage(chat.id)!;
+		const cov = (await sessionCoverage(chat.id))!;
 		assert.equal(cov.totalMessages, 3);
 		assert.equal(cov.coveredCount, 2);
 		assert.equal(cov.uncoveredCount, 1);
@@ -1026,8 +1053,8 @@ describe("session coverage read (extraction-UX redesign, 2026-09-24)", () => {
 		assert.equal(cov.lastFoldedAt, "2026-09-24T11:30:00.000Z", "the NEWEST fold, and scoped to this session's rows");
 	});
 
-	it("running: true only for THIS session's chat-kind run (the registry pin)", () => {
-		const chat = fixtureChat("coverage running", [user("cov_r1", "running pin")].flat());
+	it("running: true only for THIS session's chat-kind run (the registry pin)", async () => {
+		const chat = (await fixtureChat("coverage running", [user("cov_r1", "running pin")].flat()));
 		const g = globalThis as { __lhExtractionRuns?: unknown };
 		const realRuns = g.__lhExtractionRuns;
 		try {
@@ -1040,7 +1067,7 @@ describe("session coverage read (extraction-UX redesign, 2026-09-24)", () => {
 				inFlight: new Set(),
 				lastStartedAt: 0,
 			};
-			assert.equal(sessionCoverage(chat.id)!.running, false, "no chat-kind run for this id");
+			assert.equal((await sessionCoverage(chat.id))!.running, false, "no chat-kind run for this id");
 			g.__lhExtractionRuns = {
 				running: new Map([
 					[chat.id, { chatId: chat.id, kind: "chat", phase: "extracting", startedAt: 3, usage: {}, controller: new AbortController() }],
@@ -1048,14 +1075,14 @@ describe("session coverage read (extraction-UX redesign, 2026-09-24)", () => {
 				inFlight: new Set(),
 				lastStartedAt: 0,
 			};
-			assert.equal(sessionCoverage(chat.id)!.running, true);
+			assert.equal((await sessionCoverage(chat.id))!.running, true);
 		} finally {
 			g.__lhExtractionRuns = realRuns;
 		}
 	});
 
-	it("unknown chat → null (the caller owns the 404)", () => {
-		assert.equal(sessionCoverage("chat_never_was"), null);
+	it("unknown chat → null (the caller owns the 404)", async () => {
+		assert.equal((await sessionCoverage("chat_never_was")), null);
 	});
 });
 

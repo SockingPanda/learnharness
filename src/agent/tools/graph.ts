@@ -1,5 +1,6 @@
 import { Type } from "typebox";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
+import { readGraphCalculationDeps, readDerivedGraph } from "../graph-storage.ts";
 import { serverExecute } from "../tool-execute.ts";
 import { getGraph, graphSessionIndex, graphSessionPropositions } from "../../core/graph.ts";
 import type { ChatStore, GraphStore } from "../../core/ports.ts";
@@ -50,7 +51,7 @@ export function proberGraphTools(ctx: GraphToolContext): Record<string, AgentToo
 				"Reading this first shows what he has already covered and when, before you probe anything.",
 			parameters: listSessionsInput,
 			execute: serverExecute("list_sessions", listSessionsInput, async (): Promise<string> => {
-				const sessions = graphSessionIndex(deps);
+				const sessions = graphSessionIndex(await readGraphCalculationDeps(deps));
 				if (sessions.length === 0) return "The knowledge graph is empty — no session has contributed propositions yet.";
 				const lines = sessions.map((s, i) =>
 					`${i + 1}. ${s.name} (${s.kind}, ${s.propositions} proposition${s.propositions === 1 ? "" : "s"}, ` +
@@ -67,7 +68,8 @@ export function proberGraphTools(ctx: GraphToolContext): Record<string, AgentToo
 				"Names only — no statement text, no session contents (owner ruling 2026-09-23: the map's ORGANIZATION is your business, its prose is not).",
 			parameters: listPropositionsInput,
 			execute: serverExecute("list_propositions", listPropositionsInput, async ({ session }): Promise<string> => {
-				const propositions = graphSessionPropositions(deps, session);
+				const view = await readGraphCalculationDeps(deps);
+				const propositions = graphSessionPropositions(view, session);
 				if (propositions.length === 0) {
 					return `No propositions born in session "${session}". Call list_sessions for the current ids.`;
 				}
@@ -127,7 +129,7 @@ export function auditorGraphTools(ctx: GraphToolContext): Record<string, AgentTo
 				"This is how you decide whether a new proposition IS an existing one: search its key words, its synonyms, its phrasings.",
 			parameters: findInput,
 			execute: serverExecute("find", findInput, async ({ query }): Promise<string> => {
-				const nodes = getGraph(deps.graphStore).nodes;
+				const nodes = (await readDerivedGraph(deps.graphStore)).nodes;
 				const hits = nodes.filter(
 					(n) => globMatch(query, n.name) || globMatch(query, n.statement) || n.aliases.some((a) => globMatch(query, a)),
 				);
@@ -154,7 +156,7 @@ export function auditorGraphTools(ctx: GraphToolContext): Record<string, AgentTo
 				"Each line: name, kind, proposition count, id. Use the id with list_propositions to see what a session covered.",
 			parameters: Type.Object({}),
 			execute: serverExecute("list_sessions", Type.Object({}), async (): Promise<string> => {
-				const sessions = graphSessionIndex(deps);
+				const sessions = graphSessionIndex(await readGraphCalculationDeps(deps));
 				if (sessions.length === 0) return "The knowledge graph is empty — no session has contributed propositions yet.";
 				const lines = sessions.map((s, i) => `${i + 1}. ${s.name} (${s.kind}, ${s.propositions} proposition${s.propositions === 1 ? "" : "s"}) — id: ${s.id}`);
 				return `${sessions.length} session(s):\n${lines.join("\n")}`;
@@ -168,9 +170,10 @@ export function auditorGraphTools(ctx: GraphToolContext): Record<string, AgentTo
 				"(deciding whether a new proposition is really one of these).",
 			parameters: listPropositionsInput,
 			execute: serverExecute("list_propositions", listPropositionsInput, async ({ session }): Promise<string> => {
-				const propositions = graphSessionPropositions(deps, session);
+				const view = await readGraphCalculationDeps(deps);
+				const propositions = graphSessionPropositions(view, session);
 				if (propositions.length === 0) return `No propositions born in session "${session}". Call list_sessions for the current ids.`;
-				const nodes = new Map(getGraph(deps.graphStore).nodes.map((n) => [n.id, n]));
+				const nodes = new Map(getGraph(view.graphStore).nodes.map((n) => [n.id, n]));
 				const lines = propositions.map((p) => {
 					const node = nodes.get(p.nodeId);
 					return `- ${p.nodeId} :: ${p.name}\n  statement: ${node?.statement ?? "(unknown)"}`;

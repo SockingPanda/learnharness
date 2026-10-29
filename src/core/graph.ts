@@ -67,12 +67,18 @@ import type {
 import { MIN_CLUSTER_SIZE } from "./clusters.ts";
 import { formatChainLine } from "./chains.ts";
 import { attachImpToCommunities, birthSessionOf, birthSessionPartition } from "./session-clusters.ts";
-import type { ChatStore, GraphStore } from "./ports.ts";
+import type { ChatStore, GraphStore, SyncStore, GraphMemoryStore } from "./ports.ts";
 
 /** The storage ports every graph operation needs, passed explicitly. */
 export interface GraphDeps {
 	chatStore: ChatStore;
 	graphStore: GraphStore;
+}
+
+/** Detached views consumed by synchronous domain calculations. */
+export interface GraphCalculationDeps {
+	chatStore: Pick<SyncStore<ChatStore>, "getChat" | "listChats">;
+	graphStore: GraphMemoryStore;
 }
 
 /** "n_" + 12 hex chars (contracts.ts GraphNode.id — store-assigned). */
@@ -149,7 +155,7 @@ export function mergeFindings(
 	chatId: string,
 	findings: SessionFindings,
 	verdicts: AuditVerdicts,
-	deps: GraphDeps,
+	deps: Pick<GraphCalculationDeps, "graphStore">,
 	source: MergeSource,
 ): EmissionStats {
 	const { graphStore: ledgers } = deps;
@@ -402,7 +408,7 @@ export interface DerivedGraph {
  * arg_ id / premises / createdAt are the chain's identity.
  * `store events, derive state` — this is the only reader that matters.
  */
-export function getGraph(graphStore: Pick<GraphStore, "readNodes" | "readChains">): DerivedGraph {
+export function getGraph(graphStore: Pick<SyncStore<GraphStore>, "readNodes" | "readChains">): DerivedGraph {
 	// Merge node lines by id (first line defines; later lines add phrasings).
 	const byId = new Map<string, GraphNode>();
 	for (const line of graphStore.readNodes()) {
@@ -506,7 +512,7 @@ export function deriveView(graph: DerivedGraph): {
 // ─── the /api/graph payload ──────────────────────────────────────────────────
 
 /** Everything the home graph view needs, in one fetch (shape: contracts). */
-export function graphSnapshot(deps: GraphDeps): GraphSnapshot {
+export function graphSnapshot(deps: GraphCalculationDeps): GraphSnapshot {
 	const graph = getGraph(deps.graphStore);
 	// The canvas-facing lossy image: propositions + derived implication
 	// nodes, untyped arrows. `chains` (the stored truth) ride along for
@@ -627,7 +633,7 @@ export interface GraphSessionEntry {
 
 /** The prober's session list: every birth session, most-recently-active
  *  first (undatable records sink, in stable id order). */
-export function graphSessionIndex(deps: GraphDeps): GraphSessionEntry[] {
+export function graphSessionIndex(deps: GraphCalculationDeps): GraphSessionEntry[] {
 	const counts = new Map<string, number>();
 	const born = getGraph(deps.graphStore);
 	for (const cluster of birthSessionPartition(born.nodes)) {
@@ -677,7 +683,7 @@ export interface GraphSessionProposition {
 
 /** The propositions BORN in one session — what that session first
  *  articulated. Members sorted by node id — deterministic. */
-export function graphSessionPropositions(deps: GraphDeps, sessionId: string): GraphSessionProposition[] {
+export function graphSessionPropositions(deps: GraphCalculationDeps, sessionId: string): GraphSessionProposition[] {
 	const born = getGraph(deps.graphStore).nodes.filter((node) => birthSessionOf(node) === sessionId);
 	return born
 		.map((node) => ({ nodeId: node.id, name: node.name }))

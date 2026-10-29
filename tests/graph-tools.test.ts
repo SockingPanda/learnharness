@@ -41,6 +41,7 @@ function fakeStores(
 ): { chatStore: ChatStore; graphStore: GraphStore } {
 	const chains: GraphChain[] = [];
 	const graphStore: GraphStore = {
+		readSnapshot: async () => ({ nodes, chains, coverage: [], checkpoints: [], sources: [], positions: {}, revision: "test" }),
 		readNodes: () => nodes,
 		readChains: () => chains,
 		readCheckpoints: () => [],

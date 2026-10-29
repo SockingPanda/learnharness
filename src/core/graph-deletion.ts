@@ -48,11 +48,9 @@
  *     own lifecycle (re-import dedupes by path hash); this wave deletes
  *     CHATS.
  *
- * Resurrection safety: the deletion runs as ONE synchronous block (no
- * awaits — atomic vs the event loop, so no extraction append can
- * interleave), and the extraction pipeline re-checks the chat record
- * before each batch's merge (a deleted chat never merges). Both seams
- * together close every corrupt/resurrect path.
+ * This module mutates only a detached in-memory draft. The service owns the
+ * shared graph gate, durable deletion barrier and atomic batch commit;
+ * asynchronous storage cannot rely on an uninterrupted event-loop turn.
  */
 
 import type {
@@ -61,7 +59,7 @@ import type {
 	GraphNode,
 	SessionCheckpoint,
 } from "./contracts.ts";
-import type { GraphStore } from "./ports.ts";
+import type { GraphMemoryStore } from "./ports.ts";
 
 /** The two deletion modes (owner-locked 2026-09-22). Machine-checkable on
  *  the API as the required `mode` query param — no default, so no
@@ -89,11 +87,10 @@ const EMPTY_STATS: ChatDeletionStats = {
 };
 
 /**
- * Remove one chat's traces from the graph ledgers. Synchronous by design
- * (the atomicity argument above); idempotent (a second run finds nothing
+ * Remove one chat's traces from the graph ledgers. Pure over a detached draft; idempotent (a second run finds nothing
  * and returns zero stats).
  */
-export function deleteChatTraces(graphStore: GraphStore, chatId: string, mode: ChatDeleteMode): ChatDeletionStats {
+export function deleteChatTraces(graphStore: GraphMemoryStore, chatId: string, mode: ChatDeleteMode): ChatDeletionStats {
 	if (mode !== "preserve-graph" && mode !== "delete-nodes") {
 		throw new Error(`Unknown deletion mode: ${mode as string}`);
 	}
@@ -271,11 +268,11 @@ export interface NodeDeletionStats {
 	chainsRemoved: number;
 }
 
-function nodeLinesOf(graphStore: GraphStore, nodeId: string): GraphNode[] {
+function nodeLinesOf(graphStore: GraphMemoryStore, nodeId: string): GraphNode[] {
 	return graphStore.readNodes().filter((line) => line.id === nodeId);
 }
 
-function chainLinesOf(graphStore: GraphStore, chainId: string): GraphChain[] {
+function chainLinesOf(graphStore: GraphMemoryStore, chainId: string): GraphChain[] {
 	return graphStore.readChains().filter((line) => line.id === chainId);
 }
 
@@ -285,7 +282,7 @@ function chainLinesOf(graphStore: GraphStore, chainId: string): GraphChain[] {
  * rewrites only the ledgers that changed (unchanged files keep their
  * mtimes — the version stamp moves only when something really did).
  */
-export function deleteNodeTraces(graphStore: GraphStore, nodeId: string): NodeDeletionStats | null {
+export function deleteNodeTraces(graphStore: GraphMemoryStore, nodeId: string): NodeDeletionStats | null {
 	const chainLines = graphStore.readChains();
 
 	// The argument branch: an arg_ id names a CHAIN, not a proposition —
