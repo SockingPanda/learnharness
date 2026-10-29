@@ -620,7 +620,7 @@ function SessionsSidebar() {
 	// revision so the graph view refetches (deletion is the one writer
 	// the status poll can't see — no run ever transitions some→none).
 	const onDeleted = useCallback(
-		(id: string, _mode: ChatDeleteMode, graphRevision: number) => {
+		(id: string, _mode: ChatDeleteMode, graphRevision: string) => {
 			setDeleting(null);
 			setChats((prev) => (prev ? prev.filter((c) => c.id !== id) : prev));
 			if (pathname === `/chat/${id}`) router.push("/");

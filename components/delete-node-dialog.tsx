@@ -150,7 +150,7 @@ export function DeleteNodeDialog({
 	/** Success path — the callers announce lh:graph-revision so the
 	 *  snapshot refetches. The deleted ids ride along so
 	 *  selection-side callers can prune. */
-	onDeleted: (nodeIds: string[], graphRevision: number) => void;
+	onDeleted: (nodeIds: string[], graphRevision: string) => void;
 }) {
 	const [busy, setBusy] = useState(false);
 	const backdropDismiss = useBackdropDismiss(() => {
@@ -193,14 +193,14 @@ export function DeleteNodeDialog({
 		setBusy(true);
 		setFailure(null);
 		const dead: string[] = [];
-		let revision = 0;
+		let revision = "";
 		try {
 			for (const n of nodes) {
 				const res = await fetch(`/api/graph/nodes/${encodeURIComponent(n.id)}`, { method: "DELETE" });
 				const body = (await res.json()) as {
 					error?: string;
 					code?: string;
-					graphRevision?: number;
+					graphRevision?: string;
 				};
 				if (!res.ok) {
 					setFailure({

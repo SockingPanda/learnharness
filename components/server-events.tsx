@@ -107,7 +107,10 @@ export function createNotifyHub() {
 /** Wire one source into a hub — the provider's ENTIRE effect body, factored
  *  out so the wiring is testable without React. Returns the disconnect. */
 export function wireSource(source: NotifySource, hub: ReturnType<typeof createNotifyHub>): () => void {
-	for (const name of SERVER_EVENT_TYPES) source.onEvent(name, (raw) => hub.dispatch(name, raw));
+	for (const name of SERVER_EVENT_TYPES) source.onEvent(name, (raw) => {
+		hub.dispatch(name, raw);
+		if (name === "storage-resync") hub.fireOpen();
+	});
 	source.onOpen(() => hub.fireOpen());
 	return () => source.close();
 }

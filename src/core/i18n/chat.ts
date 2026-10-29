@@ -1,5 +1,7 @@
 /** Static presentation strings; learner and model content stays verbatim. */
 export const chatMessages = {
+	"The previous turn was interrupted. Retry explicitly to continue.": "上次回复已中断。点击重试后再继续。",
+	"The application is shutting down.": "应用正在退出。",
 	"Session title": "会话标题",
 	"Rename this session": "重命名此会话",
 	"Rename session": "重命名会话",

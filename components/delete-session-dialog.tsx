@@ -52,7 +52,7 @@ export function DeleteSessionDialog({
 	chat: Pick<ChatListItem, "id" | "title"> | null;
 	onClose: () => void;
 	/** Success path — the sidebar owns navigation + list patching. */
-	onDeleted: (id: string, mode: ChatDeleteMode, graphRevision: number) => void;
+	onDeleted: (id: string, mode: ChatDeleteMode, graphRevision: string) => void;
 }) {
 	const [traces, setTraces] = useState(false);
 	const [busy, setBusy] = useState(false);
@@ -102,7 +102,7 @@ export function DeleteSessionDialog({
 				ok?: boolean;
 				error?: string;
 				code?: string;
-				graphRevision?: number;
+				graphRevision?: string;
 			};
 			if (!res.ok) {
 				// 409 (turn/jobs running) and 503 (extraction winding down) are
@@ -115,7 +115,7 @@ export function DeleteSessionDialog({
 				setBusy(false);
 				return;
 			}
-			onDeleted(chat.id, mode, body.graphRevision ?? 0);
+			onDeleted(chat.id, mode, body.graphRevision ?? "");
 		} catch {
 			setFailure({ code: "network", error: "Delete failed — network error. Try again." });
 			setBusy(false);

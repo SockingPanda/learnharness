@@ -24,6 +24,8 @@
 
 /** The full event vocabulary — fixed from day one (slice plan, 2026-10-02). */
 export interface ServerEvents {
+	/** A database subscription reconnected; consumers must read current truth. */
+	"storage-resync": Record<string, never>;
 	/** A teach turn began server-side (beginTurn) — client-initiated sends,
 	 *  wake turns, other-tab turns: every origin rides the same event. */
 	"turn-started": { chatId: string };
@@ -58,6 +60,7 @@ export type ServerEventType = keyof ServerEvents;
  *  name (types are erased; this list is the single source of truth for
  *  what the SSE channel can carry). */
 export const SERVER_EVENT_TYPES = [
+	"storage-resync",
 	"turn-started",
 	"turn-settled",
 	"jobs-changed",

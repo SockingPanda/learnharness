@@ -67,6 +67,17 @@ describe("notify hub + wireSource (the client channel wiring)", () => {
 		assert.equal(resyncs, 2);
 	});
 
+	it("a database subscription reconnect refreshes open views without reconnecting the browser", () => {
+		const hub = createNotifyHub();
+		const source = fakeSource();
+		wireSource(source, hub);
+		let reads = 0;
+		hub.onResync(() => reads++);
+		source.push("storage-resync", {});
+		assert.equal(reads, 1);
+		assert.equal(source.closed, false);
+	});
+
 	it("a throwing handler never breaks its neighbors (the bus's isolation law)", () => {
 		const hub = createNotifyHub();
 		const src = fakeSource();

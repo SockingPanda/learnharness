@@ -220,6 +220,7 @@ export function Chat({
 	title,
 	initialMessages,
 	initialError,
+	initialPendingTurnId,
 	initialPrompt,
 	initiallyInFlight,
 	initiallyCompacting = false,
@@ -231,6 +232,8 @@ export function Chat({
 	initialMessages: LhMessage[];
 	/** Memory-only settlement notice supplied on reopening. */
 	initialError?: string;
+	/** Any's persisted interrupted-turn receipt enables an explicit retry after restart. */
+	initialPendingTurnId?: string;
 	/** The session kind (practice sessions, owner 2026-10-04): practice
 	 *  renders no phase chip (no probe→teach arc applies) and a Practice
 	 *  tag rides the header instead. */
@@ -278,6 +281,7 @@ export function Chat({
 	// the composer, shows the pre-first-chunk shimmer, and drives the 1500ms
 	// record poll that adopts at settle if the stream can't attach.
 	const [turnInFlight, setTurnInFlight] = useState(initiallyInFlight ?? false);
+	const [pendingTurnId, setPendingTurnId] = useState(initialPendingTurnId);
 
 	// Session title: click-to-rename (owner, 2026-09-17). Clicking the header
 	// title opens edit mode with everything selected — typing replaces, arrows
@@ -622,12 +626,12 @@ export function Chat({
 			return;
 		}
 		openingDraftRef.current = prompt!;
-		if (entry?.attempted || initiallyInFlight) {
+		if (entry?.attempted || initiallyInFlight || initialPendingTurnId) {
 			applyText(prompt!); // Interrupted start: the learner explicitly resends.
 			return;
 		}
 		deliverOpeningPrompt(prompt!);
-	}, [chatId, initialPrompt, initialMessages, initiallyInFlight, deliverOpeningPrompt, applyText]);
+	}, [chatId, initialPrompt, initialMessages, initiallyInFlight, initialPendingTurnId, deliverOpeningPrompt, applyText]);
 
 	useEffect(() => {
 		if (!hasConfirmedConversation) return;
@@ -748,7 +752,7 @@ export function Chat({
 	// and completed work, without another learner message. Offered from
 	// "error" too: a dropped stream leaves the model there, and send()
 	// recovers from it. Later compaction requires new input instead.
-	const retryable = (status === "ready" || status === "error") && !busy && !compacting && endsInFailedTurn(nativeMessages);
+	const retryable = (status === "ready" || status === "error") && !busy && !compacting && (endsInFailedTurn(nativeMessages) || !!pendingTurnId);
 	const retryFailedTurn = () => retryFailedResponse(send, draftRef);
 	const canSend =
 		(text.trim().length > 0 || dictation.active) && !pending && !activeProblem && !compacting;
@@ -788,7 +792,8 @@ export function Chat({
 	const syncFromServer = useCallback(async () => {
 		const res = await fetch(`/api/chats/${chatId}`);
 		if (!res.ok) return;
-		const record = (await res.json()) as { messages?: LhMessage[]; turns?: TurnUsage[]; pricing?: SessionPricing; turnError?: string };
+		const record = (await res.json()) as { messages?: LhMessage[]; turns?: TurnUsage[]; pricing?: SessionPricing; turnError?: string; pendingTurnId?: string };
+		setPendingTurnId(record.pendingTurnId);
 		if (Array.isArray(record.turns)) setTurns(record.turns);
 		setPricing(record.pricing);
 		if (!Array.isArray(record.messages)) return;
