@@ -565,10 +565,10 @@ function checkForUpdates({ manual = false } = {}) {
 		});
 }
 
-function installUpdateNow() {
+async function installUpdateNow() {
 	// Kill the server BEFORE the quit-and-install (see block comment).
 	try {
-		killServer();
+		await killServer();
 	} catch {
 		/* already dead */
 	}

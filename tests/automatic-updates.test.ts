@@ -18,6 +18,7 @@ function fixture({ packaged = true, updaterMissing = false } = {}) {
 	const settingsReads: string[] = [];
 	const order: string[] = [];
 	const intervals: { callback: () => void; delay: number }[] = [];
+	const timeouts: { callback: () => void; delay: number; active: boolean }[] = [];
 	const handles = new Map<string, (event: unknown) => unknown>();
 	const windows: FakeWindow[] = [];
 	let enumerationFails = false;
@@ -39,6 +40,10 @@ function fixture({ packaged = true, updaterMissing = false } = {}) {
 		quitAndInstall() { order.push("install"); }
 	}
 	const updater = new FakeUpdater();
+	class FakeChild extends EventEmitter {
+		kill(signal: string) { order.push(signal); return true; }
+	}
+	const child = new FakeChild();
 	class FakeWebContents extends EventEmitter {
 		mainFrame = { url: "http://127.0.0.1:9000/" };
 		messages: { channel: string; value: unknown }[] = [];
@@ -103,13 +108,18 @@ function fixture({ packaged = true, updaterMissing = false } = {}) {
 		process: { argv: [], env: { LH_DEV_URL: "http://127.0.0.1:9000" }, platform: "darwin", on() {} },
 		__dirname: path.dirname(mainFile), URL,
 		setInterval: (callback: () => void, delay: number) => intervals.push({ callback, delay }),
-		setTimeout() {},
-		fixtureChild: { kill: (signal: string) => order.push(signal) },
+		setTimeout: (callback: () => void, delay: number) => {
+			const timer = { callback, delay, active: true };
+			timeouts.push(timer);
+			return timer;
+		},
+		clearTimeout: (timer: { active: boolean }) => { timer.active = false; },
+		fixtureChild: child,
 	});
 	runInContext(mainSource, context, { filename: mainFile });
 	const run = (code: string) => runInContext(code, context);
 	return {
-		run, updater, windows, intervals, handles, settingsReads, order, app,
+		run, updater, windows, intervals, timeouts, handles, settingsReads, order, app, child,
 		setSettings: (value: unknown) => { settings = JSON.stringify(value); },
 		setSettingsFailure: (value: string | Error) => { settings = value; },
 		setEnumerationFailure: (value: boolean) => { enumerationFails = value; },
@@ -228,8 +238,24 @@ describe("status observation never controls the updater", () => {
 		f.updater.emit("update-downloaded", { version: "0.3.8" }); await f.check();
 		assert.equal(f.state().status, "downloaded"); assert.equal(f.updater.checks, 0);
 		assert.equal(f.updater.autoDownload, true); assert.equal(f.updater.autoInstallOnAppQuit, true);
-		f.run("serverProcess = fixtureChild; installUpdateNow()");
+		const installing = f.run("serverProcess = fixtureChild; installUpdateNow()");
+		assert.deepEqual(f.order, ["SIGTERM"], "an update cannot replace the app while its server is still running");
+		f.child.emit("exit", 0);
+		await installing;
 		assert.deepEqual(f.order, ["SIGTERM", "install"]);
+		assert.ok(f.timeouts.every(timer => !timer.active), "the force-exit timer is cancelled after the server exits");
+	});
+
+	it("Restart escalates a server that ignores SIGTERM, then waits for its actual exit", async () => {
+		const f = fixture(); f.run("setupAutoUpdater()");
+		const installing = f.run("serverProcess = fixtureChild; installUpdateNow()");
+		const deadline = f.timeouts.find(timer => timer.delay === 3000)!;
+		assert.ok(deadline?.active);
+		deadline.callback();
+		assert.deepEqual(f.order, ["SIGTERM", "SIGKILL"]);
+		f.child.emit("exit", null, "SIGKILL");
+		await installing;
+		assert.deepEqual(f.order, ["SIGTERM", "SIGKILL", "install"]);
 	});
 });
 
