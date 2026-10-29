@@ -37,45 +37,60 @@ export interface ReadingSourceStore {
 		originalPath?: string;
 		resolvedUrl?: string;
 		content: Uint8Array;
-	}): ReadingArchive;
-	get(chatId: string): { archive: ReadingArchive; content: Uint8Array } | null;
-	delete(chatId: string): void;
+	}): Promise<ReadingArchive>;
+	get(chatId: string): Promise<{ archive: ReadingArchive; content: Uint8Array } | null>;
+	delete(chatId: string): Promise<void>;
 }
 
 // ─── ChatStore — the session record's home (data/chats) ─────────────────────
 
+export interface ChatDeletion {
+	mode: "preserve-graph" | "delete-nodes";
+	operationId: string;
+	startedAt: string;
+}
+
 export interface ChatStore {
+	/** Persist an unfinished request receipt; recovery must not replay it automatically. */
+	setPendingTurn(id: string, turnId: string | null): Promise<void>;
+	/** Atomically change one artifact presentation flag without replacing history. */
+	setMessageInverted(id: string, messageId: string, inverted: boolean): Promise<boolean>;
+	/** Append only new native IDs; identical replay is a no-op, conflicting IDs reject. */
+	appendMessages(id: string, messages: LhMessage[]): Promise<void>;
+	/** Durable deletion barrier: normal writes must refuse after this succeeds. */
+	beginDeletion(id: string, deletion: ChatDeletion): Promise<void>;
+	listDeletingChats(): Promise<ChatRecord[]>;
 	/** Create a session record (persisted immediately). */
 	/** Create a practice or reading session; absent kind defaults to teach. */
-	createChat(title: string, kind?: "practice" | "reading"): ChatRecord;
+	createChat(title: string, kind?: "practice" | "reading"): Promise<ChatRecord>;
 	/** The full record, or null if unknown id / corrupt file. */
-	getChat(id: string): ChatRecord | null;
+	getChat(id: string): Promise<ChatRecord | null>;
 	/** All sessions, newest activity first (the sidebar's list view). */
-	listChats(): ChatSummary[];
+	listChats(): Promise<ChatSummary[]>;
 	/** Persist the full native message list (the record IS the agent
 	 * state — Wave B, owner-approved 2026-09-26). */
-	saveMessages(id: string, messages: LhMessage[]): void;
+	saveMessages(id: string, messages: LhMessage[]): Promise<void>;
 	/** Persist the session plan tree (plan tools call this in execute). */
-	saveTree(id: string, tree: PlanTree): void;
+	saveTree(id: string, tree: PlanTree): Promise<void>;
 	/** Append one usage entry to the record's turn log (the money channel,
 	 * 2026-09): idempotent per turn id — each request carries its own, so
 	 * a turn persisted twice appends once while continuation turns (which
 	 * share a response message id) each keep their usage. */
-	appendTurnUsage(id: string, entry: TurnUsage): void;
+	appendTurnUsage(id: string, entry: TurnUsage): Promise<void>;
 	/** Append one extraction-run usage entry — idempotent per startedAt. */
-	appendExtractionUsage(id: string, entry: ExtractionRunUsage): void;
+	appendExtractionUsage(id: string, entry: ExtractionRunUsage): Promise<void>;
 	/** Persist the per-chat model/thinking settings (the model control).
 	 *  Replace-whole: the picker sends the complete settings object. */
-	saveSettings(id: string, settings: ChatSettings): void;
+	saveSettings(id: string, settings: ChatSettings): Promise<void>;
 	/** Rename a session (the header's click-to-edit title, 2026-09-17).
 	 * Like saveSettings: a rename is NOT conversation activity — updatedAt
 	 * stays put, so sidebar order never churns on a rename. */
-	renameChat(id: string, title: string): ChatRecord;
+	renameChat(id: string, title: string): Promise<ChatRecord>;
 	/** Delete the session record entirely (session-deletion wave 6, owner
 	 *  2026-09-22). False when the id is unknown. The graph-ledger purge and
 	 *  job cleanup are the caller's choreography (core/graph-deletion.ts +
 	 *  the DELETE route), not the store's. */
-	deleteChat(id: string): boolean;
+	deleteChat(id: string): Promise<boolean>;
 }
 
 // ─── GraphStore — the append-only evidence ledgers (data/graph) ──────────────
@@ -86,44 +101,74 @@ export interface ChatStore {
 // decides. The extraction pipeline is the sole writer; this read surface
 // stays.
 
+export interface GraphLedgers {
+	nodes: GraphNode[];
+	chains: GraphChain[];
+	coverage: CoverageEntry[];
+	checkpoints: SessionCheckpoint[];
+}
+
+export interface GraphLedgerSnapshot extends GraphLedgers {
+	positions: Record<string, Position>;
+	sources: NotesSource[];
+	revision: string;
+}
+
+/** One replay-safe graph operation. Append and replace cannot target the same ledger. */
+export interface GraphCommit {
+	operationId: string;
+	append?: Partial<GraphLedgers>;
+	replace?: Partial<GraphLedgers>;
+	positions?: Record<string, Position>;
+}
+
+/** Synchronous views are only for in-memory domain calculations and fixtures. */
+export type SyncStore<T> = { [K in keyof T]: T[K] extends (...args: infer A) => infer R ? (...args: A) => Awaited<R> : T[K] };
+
+/** Only synchronous operations used by detached graph calculations. */
+export type GraphMemoryStore = Omit<SyncStore<GraphStore>, "readSnapshot" | "commitBatch" | "getRevision">;
+
 export interface GraphStore {
+	readSnapshot(): Promise<GraphLedgerSnapshot>;
+	commitBatch(batch: GraphCommit): Promise<void>;
+	getRevision(): Promise<string>;
 	/** Append one GraphNode (ids are unique — no merging needed). */
-	appendNode(node: GraphNode): void;
+	appendNode(node: GraphNode): Promise<void>;
 	/** Raw node lines in append order. */
-	readNodes(): GraphNode[];
+	readNodes(): Promise<GraphNode[]>;
 
 	/** Append one chain ASSERTION (a second session asserting the same
 	 *  (premises, conclusion) appends another line; readers merge). */
-	appendChain(assertion: GraphChain): void;
-	readChains(): GraphChain[];
+	appendChain(assertion: GraphChain): Promise<void>;
+	readChains(): Promise<GraphChain[]>;
 
 	/** Append one emission checkpoint. */
-	appendCheckpoint(checkpoint: SessionCheckpoint): void;
-	readCheckpoints(): SessionCheckpoint[];
+	appendCheckpoint(checkpoint: SessionCheckpoint): Promise<void>;
+	readCheckpoints(): Promise<SessionCheckpoint[]>;
 	/** Message-granular extraction coverage (vision-extraction-coverage.md):
 	 *  append-only; one line per covered message. The chat-extraction
 	 *  checkpoint — "uncovered" is derived from these, never tracked. */
-	appendCoverage(entry: CoverageEntry): void;
-	readCoverage(): CoverageEntry[];
+	appendCoverage(entry: CoverageEntry): Promise<void>;
+	readCoverage(): Promise<CoverageEntry[]>;
 
 	/** Append one cluster-naming run's usage (graph-global money channel) —
 	 *  idempotent per startedAt. */
 
 	/** Upsert one imported-notes source record (config.SOURCES_FILE — a
 	 *  JSON map, not a ledger; an upsert keeps the existing usage log). */
-	upsertSource(source: NotesSource): void;
+	upsertSource(source: NotesSource): Promise<void>;
 	/** Every notes source record, by id order-insensitive. */
-	readSources(): NotesSource[];
+	readSources(): Promise<NotesSource[]>;
 	/** Append one run's usage to a source record — idempotent per
 	 *  startedAt, mirroring ChatRecord.extractions. */
-	appendSourceUsage(id: string, entry: ExtractionRunUsage): void;
+	appendSourceUsage(id: string, entry: ExtractionRunUsage): Promise<void>;
 
 	/** The layout ledger (config.POSITIONS_FILE): nodeId → resting {x,y}.
 	 *  WRITTEN ONLY by the incremental settle after a merge (core/layout.ts
 	 *  settleGraphLayout) — read-only for everything else. */
-	readPositions(): Record<string, Position>;
+	readPositions(): Promise<Record<string, Position>>;
 	/** Replace the whole ledger (the settle is a full-graph computation). */
-	writePositions(positions: Record<string, Position>): void;
+	writePositions(positions: Record<string, Position>): Promise<void>;
 
 	/** THE DESTRUCTIVE SEAM (session-deletion wave 6, owner 2026-09-22 —
 	 *  the first non-append operation on these ledgers): atomically
@@ -138,7 +183,7 @@ export interface GraphStore {
 		chains?: GraphChain[];
 		coverage?: CoverageEntry[];
 		checkpoints?: SessionCheckpoint[];
-	}): void;
+	}): Promise<void>;
 }
 
 // ─── JobStore — background sub-agent jobs (data/jobs) ─────────────────────────
@@ -158,19 +203,19 @@ export type JobPatch = Partial<Omit<JobRecord, "id" | "kind" | "chatId" | "toolC
 
 export interface JobStore {
 	/** Create a running job (keyed by toolCallId for spawn dedup). */
-	createJob(init: CreateJobInit): JobRecord;
-	getJob(id: string): JobRecord | null;
+	createJob(init: CreateJobInit): Promise<JobRecord>;
+	getJob(id: string): Promise<JobRecord | null>;
 	/** Merge a patch into the record; null if unknown id. */
-	updateJob(id: string, patch: JobPatch): JobRecord | null;
+	updateJob(id: string, patch: JobPatch): Promise<JobRecord | null>;
 	/** All jobs for a chat, newest activity first. */
-	listJobs(chatId: string): JobRecord[];
+	listJobs(chatId: string): Promise<JobRecord[]>;
 	/** The job fulfilling a given tool part, if any (spawn-hook dedup). */
-	findJobByToolCallId(chatId: string, toolCallId: string): JobRecord | null;
+	findJobByToolCallId(chatId: string, toolCallId: string): Promise<JobRecord | null>;
 	/** Delete every job record for a chat — running or finished (session-
 	 *  deletion wave 6). Returns how many files were removed. The deletion
 	 *  route refuses while jobs are still running, so by the time this
 	 *  fires every record is terminal. */
-	deleteJobsForChat(chatId: string): number;
+	deleteJobsForChat(chatId: string): Promise<number>;
 }
 
 // ─── SettingsStore — THE user settings record (settings-storage wave, 2026-09-19) ──

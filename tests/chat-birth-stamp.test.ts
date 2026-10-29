@@ -52,7 +52,7 @@ describe("POST /api/chats — the birth stamp", () => {
 		const res = await post();
 		assert.equal(res.status, 200);
 		const { id } = (await res.json()) as { id: string };
-		const record = chatStore.getChat(id);
+		const record = (await chatStore.getChat(id));
 		assert.ok(record);
 		assert.deepEqual(record.settings, {
 			model: { provider: "openrouter", id: "z-ai/glm-5.3-flash" },
@@ -66,7 +66,7 @@ describe("POST /api/chats — the birth stamp", () => {
 		const res = await post();
 		assert.equal(res.status, 200);
 		const { id } = (await res.json()) as { id: string };
-		const record = chatStore.getChat(id);
+		const record = (await chatStore.getChat(id));
 		assert.ok(record);
 		assert.equal(record.settings, undefined, "nothing stamped — nothing to lie about");
 	});
@@ -78,7 +78,7 @@ describe("POST /api/chats — the birth stamp", () => {
 		});
 		const res = await post();
 		const { id } = (await res.json()) as { id: string };
-		const record = chatStore.getChat(id);
+		const record = (await chatStore.getChat(id));
 		assert.ok(record);
 		assert.equal(record.settings?.thinkingLevel, undefined);
 		assert.deepEqual(record.settings, { model: { provider: "openrouter", id: "z-ai/glm-5.3-flash" } });
@@ -99,8 +99,8 @@ describe("POST /api/chats — the birth stamp", () => {
 		// carries the new default. This is the regression pin for the
 		// reported bug (2026-09-28): both UIs showed the strong slot while
 		// every chat ran a fossil stamp.
-		const firstRecord = chatStore.getChat(first.id);
-		const secondRecord = chatStore.getChat(second.id);
+		const firstRecord = (await chatStore.getChat(first.id));
+		const secondRecord = (await chatStore.getChat(second.id));
 		assert.ok(firstRecord && secondRecord);
 		assert.equal(firstRecord.settings?.model?.id, "z-ai/glm-5.3-flash");
 		assert.equal(secondRecord.settings?.model?.id, "gpt-6-luna");

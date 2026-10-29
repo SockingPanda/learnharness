@@ -29,6 +29,10 @@ import type { EmissionStats } from "./graph.ts";
 export type ChatKind = "teach" | "practice" | "reading";
 
 export interface ChatRecord {
+	/** Any Preview interrupted-request receipt, cleared only after successful settlement. */
+	pendingTurnId?: string;
+	/** Persisted barrier while cross-object deletion is being recovered. */
+	deleting?: { mode: "preserve-graph" | "delete-nodes"; operationId: string; startedAt: string };
 	id: string;
 	title: string;
 	createdAt: string;

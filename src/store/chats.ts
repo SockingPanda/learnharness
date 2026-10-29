@@ -2,8 +2,9 @@
  * ChatStore — the fs JSON adapter (one file per chat in data/chats/).
  *
  * Implements core/ports.ts ChatStore; the record shapes live in
- * core/contracts.ts (ChatRecord/ChatSummary). Idioms: sync fs, tiny
- * records, id-guarded filenames, JSON with tab indentation. Wired in the
+ * core/contracts.ts (ChatRecord/ChatSummary). The asynchronous port queues
+ * atomic file operations; records use id-guarded filenames and JSON with
+ * tab indentation. Wired in the
  * composition root (src/server/stores.ts); nothing else constructs it.
  */
 
@@ -11,12 +12,16 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { PATHS } from "../../config.ts";
 import { emit } from "../core/events.ts";
-import type { ChatStore } from "../core/ports.ts";
+import type { ChatDeletion, ChatStore } from "../core/ports.ts";
 import type { ChatRecord, ChatSettings, ChatSummary, ExtractionRunUsage, PlanTree, TurnUsage } from "../core/contracts.ts";
 import { CURRENT_CHAT_VERSION } from "../core/contracts.ts";
 import type { LhMessage } from "../core/native-messages.ts";
-import { activeProblemOf, danglingQuestionOf } from "../core/native-messages.ts";
+import { danglingQuestionOf } from "../core/native-messages.ts";
 import { phaseAt3Lh } from "../core/phases.ts";
+import { setSteerUiInverted } from "../core/contracts/jobs.ts";
+import { atomicWriteFile, canonicalJson, fileStoreQueue, syncDirectory } from "./fs-atomic.ts";
+
+const queue = fileStoreQueue(PATHS.chats);
 
 function chatFile(id: string): string {
 	if (!/^[A-Za-z0-9_-]+$/.test(id)) throw new Error(`Invalid chat id: ${id}`);
@@ -55,7 +60,7 @@ function createChat(title: string, kind?: "practice" | "reading"): ChatRecord {
  *  lazy migration means existing files only get stamped on their next write.
  *  A future-version guard lives on the read side (getChat). */
 function writeChat(record: ChatRecord): void {
-	fs.writeFileSync(chatFile(record.id), JSON.stringify({ ...record, version: CURRENT_CHAT_VERSION }, null, "\t"), "utf-8");
+	atomicWriteFile(chatFile(record.id), JSON.stringify({ ...record, version: CURRENT_CHAT_VERSION }, null, "\t"));
 }
 
 function getChat(id: string): ChatRecord | null {
@@ -68,6 +73,7 @@ function getChat(id: string): ChatRecord | null {
 	// Honest refusal (owner ruling 2026-10-10): a record stamped NEWER than
 	// this build (the downgrade scenario) reads as absent, never misparsed —
 	// the next read-modify-write must not rewrite what it doesn't understand.
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
 	const v = (parsed as { version?: unknown }).version;
 	if (typeof v === "number" && v > CURRENT_CHAT_VERSION) {
 		console.error(`[chat ${id}] record stamped with schema version ${v} > ${CURRENT_CHAT_VERSION} — this app build is older; refusing to read it`);
@@ -83,7 +89,7 @@ function listChats(): ChatSummary[] {
 			.readdirSync(PATHS.chats)
 			.filter((f) => f.endsWith(".json"))
 			.map((f) => getChat(f.slice(0, -5)))
-			.filter((r): r is ChatRecord => r !== null)
+			.filter((r): r is ChatRecord => r !== null && !r.deleting)
 			.map(({ messages, tree, turns, extractions, ...summary }) => {
 				// Per-record isolation (Wave B): a record whose messages fail the
 				// projection (e.g. pre-Wave-B UIMessage-format scratch — the
@@ -124,10 +130,77 @@ function listChats(): ChatSummary[] {
  *  Wave B: replay is state.messages = record.messages). SILENT by the
  *  events law — see the SILENCE LAW comment at createChat. */
 function saveMessages(id: string, messages: LhMessage[]): void {
-	const record = getChat(id);
-	if (!record) throw new Error(`Chat not found: ${id}`);
+	const record = writableChat(id);
 	record.messages = messages;
 	record.updatedAt = new Date().toISOString();
+	writeChat(record);
+}
+
+function writableChat(id: string): ChatRecord {
+	const record = getChat(id);
+	if (!record) throw new Error(`Chat not found: ${id}`);
+	if (record.deleting) throw new Error(`Chat is being deleted: ${id}`);
+	return record;
+}
+
+function appendMessages(id: string, messages: LhMessage[]): void {
+	const record = writableChat(id);
+	const known = new Map(record.messages.map((message) => [message.id, canonicalJson(message)]));
+	const appended: LhMessage[] = [];
+	for (const message of messages) {
+		if (!message.id) throw new Error("A stored message requires a stable id.");
+		const body = canonicalJson(message);
+		const previous = known.get(message.id);
+		if (previous !== undefined) {
+			if (previous !== body) throw new Error(`Conflicting message id: ${message.id}`);
+			continue;
+		}
+		known.set(message.id, body);
+		appended.push(message);
+	}
+	if (appended.length === 0) return;
+	record.messages.push(...appended);
+	record.updatedAt = new Date().toISOString();
+	writeChat(record);
+}
+
+function beginDeletion(id: string, deletion: ChatDeletion): void {
+	const record = getChat(id);
+	if (!record) throw new Error(`Chat not found: ${id}`);
+	if (record.deleting) {
+		if (record.deleting.mode !== deletion.mode) throw new Error("A different deletion is already in progress.");
+		return;
+	}
+	record.deleting = deletion;
+	writeChat(record);
+	emit("chats-changed", {});
+}
+
+function listDeletingChats(): ChatRecord[] {
+	try {
+		return fs.readdirSync(PATHS.chats)
+			.filter((file) => file.endsWith(".json"))
+			.map((file) => getChat(file.slice(0, -5)))
+			.filter((record): record is ChatRecord => record !== null && record.deleting !== undefined);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+		throw error;
+	}
+}
+
+function setMessageInverted(id: string, messageId: string, inverted: boolean): boolean {
+	const record = writableChat(id);
+	const next = setSteerUiInverted(record.messages, messageId, inverted);
+	if (next.every((message, index) => message === record.messages[index])) return false;
+	record.messages = next;
+	writeChat(record);
+	return true;
+}
+
+function setPendingTurn(id: string, turnId: string | null): void {
+	const record = writableChat(id);
+	if (turnId === null) delete record.pendingTurnId;
+	else record.pendingTurnId = turnId;
 	writeChat(record);
 }
 
@@ -136,8 +209,7 @@ function saveMessages(id: string, messages: LhMessage[]): void {
  * persist appends once, while continuation turns (which share a response
  *  message id) each keep their usage. */
 function appendTurnUsage(id: string, entry: TurnUsage): void {
-	const record = getChat(id);
-	if (!record) throw new Error(`Chat not found: ${id}`);
+	const record = writableChat(id);
 	record.turns = record.turns?.some((t) => t.id === entry.id)
 		? record.turns
 		: [...(record.turns ?? []), entry];
@@ -148,8 +220,7 @@ function appendTurnUsage(id: string, entry: TurnUsage): void {
  * log — idempotent per startedAt: a retry that reaches the append twice
  * (abort replays) does not double-count spend. */
 function appendExtractionUsage(id: string, entry: ExtractionRunUsage): void {
-	const record = getChat(id);
-	if (!record) throw new Error(`Chat not found: ${id}`);
+	const record = writableChat(id);
 	record.extractions = record.extractions?.some((r) => r.startedAt === entry.startedAt)
 		? record.extractions
 		: [...(record.extractions ?? []), entry];
@@ -159,8 +230,7 @@ function appendExtractionUsage(id: string, entry: ExtractionRunUsage): void {
 /** Persist the per-chat model/thinking settings — replace-whole (the
  * picker sends the complete object; absent = config defaults). */
 function saveSettings(id: string, settings: ChatSettings): void {
-	const record = getChat(id);
-	if (!record) throw new Error(`Chat not found: ${id}`);
+	const record = writableChat(id);
 	// Like saveTree: a settings tweak is not conversation activity, so it
 	// deliberately does NOT bump updatedAt (sidebar order must not churn).
 	record.settings = settings;
@@ -173,8 +243,7 @@ function saveSettings(id: string, settings: ChatSettings): void {
  * string becomes "Untitled session" (the API gate rejects it first; this
  * is the honest floor for any other caller). */
 function renameChat(id: string, title: string): ChatRecord {
-	const record = getChat(id);
-	if (!record) throw new Error(`Chat not found: ${id}`);
+	const record = writableChat(id);
 	record.title = title.trim() || "Untitled session";
 	writeChat(record);
 	emit("chats-changed", {});
@@ -188,17 +257,18 @@ function renameChat(id: string, title: string): ChatRecord {
 function deleteChat(id: string): boolean {
 	try {
 		fs.unlinkSync(chatFile(id));
+		syncDirectory(PATHS.chats);
 		emit("chats-changed", {}); // only a real removal — the present-entry law
 		return true;
-	} catch {
-		return false; // never existed, already deleted, or unreadable — same answer
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+		throw error;
 	}
 }
 
 /** Persist the session plan tree (plan tools call this in execute). */
 function saveTree(id: string, tree: PlanTree): void {
-	const record = getChat(id);
-	if (!record) throw new Error(`Chat not found: ${id}`);
+	const record = writableChat(id);
 	record.tree = tree;
 	// Deliberately does NOT bump updatedAt: tree mutations piggyback on the
 	// turn's saveMessages, and sidebar ordering shouldn't churn on tree edits.
@@ -206,14 +276,19 @@ function saveTree(id: string, tree: PlanTree): void {
 }
 
 export const chatStore: ChatStore = {
-	createChat,
-	getChat,
-	listChats,
-	saveMessages,
-	saveTree,
-	saveSettings,
-	renameChat,
-	deleteChat,
-	appendTurnUsage,
-	appendExtractionUsage,
+	createChat: (...args) => queue.run(() => createChat(...args)),
+	getChat: (...args) => queue.run(() => getChat(...args)),
+	listChats: () => queue.run(listChats),
+	saveMessages: (...args) => queue.run(() => saveMessages(...args)),
+	appendMessages: (...args) => queue.run(() => appendMessages(...args)),
+	beginDeletion: (...args) => queue.run(() => beginDeletion(...args)),
+	listDeletingChats: () => queue.run(listDeletingChats),
+	setMessageInverted: (...args) => queue.run(() => setMessageInverted(...args)),
+	setPendingTurn: (...args) => queue.run(() => setPendingTurn(...args)),
+	saveTree: (...args) => queue.run(() => saveTree(...args)),
+	saveSettings: (...args) => queue.run(() => saveSettings(...args)),
+	renameChat: (...args) => queue.run(() => renameChat(...args)),
+	deleteChat: (...args) => queue.run(() => deleteChat(...args)),
+	appendTurnUsage: (...args) => queue.run(() => appendTurnUsage(...args)),
+	appendExtractionUsage: (...args) => queue.run(() => appendExtractionUsage(...args)),
 };

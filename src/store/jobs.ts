@@ -2,10 +2,9 @@
  * JobStore — the fs JSON adapter: one file per background sub-agent job in
  * data/jobs/ (contracts.ts "THE ASYNC PROTOCOL"). Keyed by toolCallId for
  * dedup: the chat-handler spawn hook never creates two jobs for the same
- * tool part. Implements core/ports.ts JobStore. Idioms: sync fs, id-guarded
- * filenames, JSON with tab indentation. Writes are small and rare (activity
- * line updates); the read-modify-write sections in the runner contain no
- * awaits, so they are atomic within the single-threaded event loop.
+ * tool part. Implements the asynchronous core/ports.ts JobStore. A store
+ * queue serializes reads and atomic read-modify-write operations, including
+ * deduplication during simultaneous creates. Filenames remain id-guarded.
  */
 
 import * as fs from "node:fs";
@@ -15,9 +14,11 @@ import { emit } from "../core/events.ts";
 import type { JobStore } from "../core/ports.ts";
 import type { CreateJobInit, JobPatch } from "../core/ports.ts";
 import type { JobRecord } from "../core/contracts.ts";
+import { atomicWriteFile, fileStoreQueue, syncDirectory } from "./fs-atomic.ts";
 
 /** Background jobs (data/jobs). Not in config.ts PATHS (orchestrator-owned). */
 const JOBS_DIR = path.join(PATHS.data, "jobs");
+const queue = fileStoreQueue(JOBS_DIR);
 
 function jobFile(id: string): string {
 	if (!/^[A-Za-z0-9_-]+$/.test(id)) throw new Error(`Invalid job id: ${id}`);
@@ -29,6 +30,8 @@ function jobFile(id: string): string {
  *  retires the view's interval poll (push S4, 2026-10-02): dispatch cards,
  *  progress lines, settles, and aborts all surface as one fetch. */
 function createJob(init: CreateJobInit): JobRecord {
+	const existing = findJobByToolCallId(init.chatId, init.toolCallId);
+	if (existing) return existing;
 	const now = new Date().toISOString();
 	const record: JobRecord = {
 		id: `job_${Date.now().toString(36)}_${crypto.randomUUID().slice(0, 8)}`,
@@ -42,7 +45,7 @@ function createJob(init: CreateJobInit): JobRecord {
 		updatedAt: now,
 	};
 	fs.mkdirSync(JOBS_DIR, { recursive: true });
-	fs.writeFileSync(jobFile(record.id), JSON.stringify(record, null, "\t"), "utf-8");
+	atomicWriteFile(jobFile(record.id), JSON.stringify(record, null, "\t"));
 	emit("jobs-changed", { chatId: init.chatId });
 	return record;
 }
@@ -62,7 +65,7 @@ function updateJob(id: string, patch: JobPatch): JobRecord | null {
 	const record = getJob(id);
 	if (!record) return null;
 	const next: JobRecord = { ...record, ...patch, updatedAt: patch.updatedAt ?? new Date().toISOString() };
-	fs.writeFileSync(jobFile(id), JSON.stringify(next, null, "\t"), "utf-8");
+	atomicWriteFile(jobFile(id), JSON.stringify(next, null, "\t"));
 	// EVERY write, not just status flips: progress-line updates must reach
 	// the dispatch cards (the view debounces the fetch bursts). A missing id
 	// wrote nothing and stays silent.
@@ -100,21 +103,24 @@ function deleteJobsForChat(chatId: string): number {
 		try {
 			fs.unlinkSync(jobFile(job.id));
 			removed++;
-		} catch {
-			/* already gone — the count is best-effort truth */
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 		}
 	}
 	// Only when something actually died — a zero-file delete wrote nothing
 	// (the endTurn present-entry law).
-	if (removed > 0) emit("jobs-changed", { chatId });
+	if (removed > 0) {
+		syncDirectory(JOBS_DIR);
+		emit("jobs-changed", { chatId });
+	}
 	return removed;
 }
 
 export const jobStore: JobStore = {
-	createJob,
-	getJob,
-	updateJob,
-	listJobs,
-	findJobByToolCallId,
-	deleteJobsForChat,
+	createJob: (...args) => queue.run(() => createJob(...args)),
+	getJob: (...args) => queue.run(() => getJob(...args)),
+	updateJob: (...args) => queue.run(() => updateJob(...args)),
+	listJobs: (...args) => queue.run(() => listJobs(...args)),
+	findJobByToolCallId: (...args) => queue.run(() => findJobByToolCallId(...args)),
+	deleteJobsForChat: (...args) => queue.run(() => deleteJobsForChat(...args)),
 };

@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import { PATHS } from "../../config.ts";
 import type { ReadingSourceStore } from "../core/ports.ts";
 import type { ReadingArchive } from "../core/reading.ts";
+import { atomicWriteFile, fileStoreQueue, syncDirectory } from "./fs-atomic.ts";
 
 type SaveInput = Parameters<ReadingSourceStore["save"]>[1];
 
@@ -50,12 +51,13 @@ function sameSource(archive: ReadingArchive, input: SaveInput): boolean {
 
 export function createReadingSourceStore(rootDir: string): ReadingSourceStore {
 	const root = path.resolve(rootDir);
+	const queue = fileStoreQueue(root);
 	const sessionDir = (chatId: string): string => {
 		if (!/^[A-Za-z0-9_-]+$/.test(chatId)) throw new Error(`Invalid chat id: ${chatId}`);
 		return path.join(root, chatId);
 	};
 
-	const get: ReadingSourceStore["get"] = (chatId) => {
+	const get = (chatId: string): Awaited<ReturnType<ReadingSourceStore["get"]>> => {
 		const dir = sessionDir(chatId);
 		const stat = statIfPresent(dir);
 		if (!stat) return null;
@@ -77,8 +79,8 @@ export function createReadingSourceStore(rootDir: string): ReadingSourceStore {
 	};
 
 	return {
-		get,
-		save(chatId, input) {
+		get: (chatId) => queue.run(() => get(chatId)),
+		save: (chatId, input) => queue.run(() => {
 			const dir = sessionDir(chatId);
 			if (!hasOrigin(input)) throw new Error("A reading source needs one original URL, or a local path for a PDF.");
 			const previous = get(chatId);
@@ -99,10 +101,11 @@ export function createReadingSourceStore(rootDir: string): ReadingSourceStore {
 			fs.mkdirSync(root, { recursive: true });
 			const temporary = fs.mkdtempSync(path.join(root, `.${chatId}-`));
 			try {
-				fs.writeFileSync(path.join(temporary, archive.fileName), input.content, { flag: "wx" });
-				fs.writeFileSync(path.join(temporary, "metadata.json"), JSON.stringify(archive, null, "\t") + "\n", { flag: "wx" });
+				atomicWriteFile(path.join(temporary, archive.fileName), input.content);
+				atomicWriteFile(path.join(temporary, "metadata.json"), JSON.stringify(archive, null, "\t") + "\n");
 				try {
 					fs.renameSync(temporary, dir);
+					syncDirectory(root);
 				} catch (error) {
 					// A second process may have published the same source first.
 					const winner = get(chatId);
@@ -113,11 +116,12 @@ export function createReadingSourceStore(rootDir: string): ReadingSourceStore {
 			} finally {
 				fs.rmSync(temporary, { recursive: true, force: true });
 			}
-		},
-		delete(chatId) {
+		}),
+		delete: (chatId) => queue.run(() => {
 			// rm unlinks a session symlink itself; it never traverses its target.
 			fs.rmSync(sessionDir(chatId), { recursive: true, force: true });
-		},
+			if (statIfPresent(root)) syncDirectory(root);
+		}),
 	};
 }
 

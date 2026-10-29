@@ -26,21 +26,21 @@ after(() => {
 });
 
 describe("session kind (practice sessions, 2026-10-04)", () => {
-	it("createChat default carries NO kind field — absence reads as teach", () => {
-		const chat = chatStore.createChat("plain session");
+	it("createChat default carries NO kind field — absence reads as teach", async () => {
+		const chat = (await chatStore.createChat("plain session"));
 		assert.equal("kind" in chat, false, "teach records carry no kind marker");
 	});
 
-	it("createChat(kind: 'practice') stamps the marker on record + list", () => {
-		const chat = chatStore.createChat("practice session", "practice");
+	it("createChat(kind: 'practice') stamps the marker on record + list", async () => {
+		const chat = (await chatStore.createChat("practice session", "practice"));
 		assert.equal(chat.kind, "practice");
-		const listed = chatStore.listChats().find((c) => c.id === chat.id);
+		const listed = (await chatStore.listChats()).find((c) => c.id === chat.id);
 		assert.equal(listed?.kind, "practice");
 	});
 
-	it("the summary projection NORMALIZES: absent record field reads as teach", () => {
-		const chat = chatStore.createChat("another plain one");
-		const listed = chatStore.listChats().find((c) => c.id === chat.id);
+	it("the summary projection NORMALIZES: absent record field reads as teach", async () => {
+		const chat = (await chatStore.createChat("another plain one"));
+		const listed = (await chatStore.listChats()).find((c) => c.id === chat.id);
 		assert.equal(listed?.kind, "teach");
 	});
 });
