@@ -59,7 +59,7 @@ Future teaching sessions can read the graph instead of starting from scratch. Pr
 
 Add your provider API key and choose your models, then start a session with what you want to understand. LearnHarness supports 30+ provider options, including OpenAI, Anthropic, Google, DeepSeek, and OpenRouter. Optional dictation and web search use separate service keys.
 
-All three platforms support in-app updates.
+The ordinary LearnHarness releases support in-app updates. Any Preview uses a separate application and disables automatic updates.
 
 **Interface language:** English and Simplified Chinese are available under **Settings → General → Interface language** (设置 → 通用 → 界面语言). The default follows your browser or system language. Your choice applies immediately and is remembered on this device. AI replies and dictation keep their existing language behavior.
 
@@ -68,16 +68,32 @@ All three platforms support in-app updates.
 ## Your keys, your data
 
 - **Your keys and models.** No LearnHarness subscription or markup. You pay your providers for usage; a live cost meter shows model costs.
-- **Local storage.** Your chats, graph, settings, and API keys live on your machine. Learning records are plain files you can inspect.
+- **Local storage.** Your chats, graph, settings, and API keys live on your machine. The ordinary application keeps inspectable files; Any Preview keeps learning records in its independently managed local Any workspace.
 - **External services.** Models run through your configured providers. Model requests send the context needed for the task; web research and dictation also contact external services. Local storage does not mean offline processing.
 - **Inspectable behavior.** System prompts are visible and editable. The app is open source under the AGPL-3.0 license.
+
+## Any Preview
+
+**LearnHarness Any Preview** is an independent local trial using official Any
+v0.3.5. It keeps its data and credentials separate from LearnHarness, archives
+article Markdown and original PDFs, and restores reading sessions and graph
+evidence after restart. It does not migrate old data or enable device sync.
+
+```bash
+npm run desktop:any:dev    # fetch the pinned runtime, build, and launch
+npm run desktop:any:dist   # package the separate preview; no publication
+```
+
+See [Any Preview](docs/any-preview.md) for prerequisites, storage behavior,
+interrupted-turn recovery and real-service tests. Model calls and web fetching
+still use your configured external services.
 
 ## Development and support
 
 ```bash
 npm install
 npm run dev        # http://localhost:3000
-npm test           # deterministic, no LLM, no network
+npm test           # no external LLM calls; Any integration uses local loopback
 ```
 
 See the [development guide](docs/development.md), [architecture](docs/architecture.md), and [desktop release guide](docs/desktop-release.md).

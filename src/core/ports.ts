@@ -3,8 +3,8 @@
  *
  * One port per ENTITY, with domain operations — never one generic
  * key/value interface. Core and the service layer that orbits it code
- * against these types only; concrete adapters live in src/store/ (fs
- * JSON/JSONL today, SQLite drop-in later) and are wired exactly once, in
+ * against these asynchronous types only; concrete file and Any adapters
+ * live in src/store/ and are wired once per workspace, in
  * the composition root (src/server/stores.ts). Dependencies point one way:
  * adapters may import core; core NEVER imports an adapter.
  */
@@ -132,7 +132,7 @@ export interface GraphStore {
 	readSnapshot(): Promise<GraphLedgerSnapshot>;
 	commitBatch(batch: GraphCommit): Promise<void>;
 	getRevision(): Promise<string>;
-	/** Append one GraphNode (ids are unique — no merging needed). */
+	/** Append one node assertion; repeated logical IDs retain separate evidence. */
 	appendNode(node: GraphNode): Promise<void>;
 	/** Raw node lines in append order. */
 	readNodes(): Promise<GraphNode[]>;
