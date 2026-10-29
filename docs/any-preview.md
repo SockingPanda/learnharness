@@ -170,3 +170,27 @@ desktop tests; it must still match the pinned version. Deterministic unit and
 runtime tests also cover delayed-save cancellation, authority changes, native
 message fidelity, graph commit recovery, attachment registration, interrupted
 deletion, deferred results and shutdown draining.
+
+### Validation on 2026-10-29
+
+The Linux workspace passed all **3,091 tests with zero skips**, type checking,
+lint, and the production build. Real Any integration exercised web and PDF
+reading, discussion and return, learner notes, graph extraction, original-byte
+hashes, restart recovery and interrupted deletion. Model responses used fixtures.
+
+Production browser checks verified source downloads and SHA-256, English and
+Chinese UI, narrow layouts, and interrupted sessions with both saved input and
+an empty opening draft. Neither recovery view automatically posted a model request.
+
+Linux AppImage and deb packages were built. The packaged Preview and ordinary
+application both ran under Xvfb, used their respective Any/file backends, and
+saved separate sessions. A second Preview launch respected its own instance lock;
+normal exit stopped its Any child. The server payload excludes the build-time
+Any cache; only the selected platform's runtime ships in `resources/any`.
+The AppImage executable also passed launch and shutdown checks with its
+FUSE-free extraction runtime. Artifact hashes accompany the packages in
+`dist/any-preview/SHA256SUMS`.
+
+macOS Apple Silicon and Windows x64 Any resources were downloaded and their
+pinned hashes and layouts checked. Those operating systems were not available
+for installer, signing or application-launch validation in this workspace.
