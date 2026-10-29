@@ -1,0 +1,25 @@
+docs/architecture.md
+  s_cc66c27d50dfb0::t_f4d1516ee55d41 436-437
+src/server/model-catalog.ts
+  s_cc66c27d50dfb0::t_a664fd9b6e8a79 9-12
+tests/chatgpt-auth.test.ts
+  s_cc66c27d50dfb0::t_0136438f95117d 685-699
+tests/chatgpt-stream.test.ts
+  s_cc66c27d50dfb0::t_cde4aa51db5c87 28,52-53,173-191
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2c685bb5cd9cbe1f88a41646049eb2d22fe44e8a",
+  "prompts": {},
+  "sessions": {
+    "s_cc66c27d50dfb0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a18751-22d4-70b1-b49a-93fdb0a09cdb",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Zebra Linux <q1033416242@gmail.com>"
+    }
+  }
+}
