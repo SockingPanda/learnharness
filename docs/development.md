@@ -10,6 +10,52 @@ Not a chat app with a graph bolted on: sessions are probe→teach lessons, the p
 - Living design doc (all decisions): [`docs/vision.md`](vision.md)
 - Build plan + wave/gate results: [`docs/plan.md`](plan.md)
 
+## Maintaining this fork
+
+This repository is maintained independently at
+[`SockingPanda/learnharness`](https://github.com/SockingPanda/learnharness).
+The official project, [`amosblomqvist/learnharness`](https://github.com/amosblomqvist/learnharness),
+is the upstream source for updates.
+
+| Remote | Repository | Purpose |
+|---|---|---|
+| `origin` | `SockingPanda/learnharness` | Our feature branches and integration history; default push target |
+| `upstream` | `amosblomqvist/learnharness` | Fetch and review official changes |
+
+For a fresh clone of our fork:
+
+```bash
+git remote add upstream https://github.com/amosblomqvist/learnharness.git
+git config remote.pushDefault origin
+```
+
+Build features on independent branches from our chosen base and push them
+to `origin`. When bringing in official updates, fetch `upstream`, review
+the changes, and merge them on a dedicated integration branch. Resolve
+conflicts and run the normal checks before integrating into our fork.
+Preserve our own commits when synchronizing. Repository remotes and the
+default push target are local Git configuration, so set them again in a
+new clone.
+
+Use ordinary merges for upstream synchronization to retain official commit
+ancestry. Git then finds the latest shared base automatically, even after
+additional commits on our side. Before merging, inspect only the new upstream
+commits and their changes from the current integration branch:
+
+```bash
+git fetch upstream
+git log --oneline HEAD..upstream/main
+git diff --stat HEAD...upstream/main
+git diff HEAD...upstream/main -- path/to/affected/file
+```
+
+The three-dot diff shows changes from the shared base to upstream, excluding
+our independent edits. Start with the commit summary and changed-file list;
+read patches and surrounding context as needed, then resolve merge conflicts
+and run the normal checks. This keeps review focused on each upstream increment.
+
+Interface localization is described in [`docs/i18n.md`](i18n.md).
+
 ## Commands
 
 ```bash

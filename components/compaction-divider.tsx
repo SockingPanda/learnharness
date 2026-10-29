@@ -1,5 +1,7 @@
 "use client";
 
+import { useI18n } from "@/components/i18n";
+
 import type { CompactionDetails } from "@/src/core";
 
 /** What one divider carries: the marker's full model-facing content (the
@@ -19,10 +21,11 @@ export interface CompactionDividerData {
  *  history was just summarized; the cut divider below carries the seam.
  *  Inert since release polish 2026-10-06 — plain text, no affordance. */
 export function CompactionMomentDivider({ data: _data }: { data: CompactionDividerData }) {
+	const { t } = useI18n();
 	return (
 		<div className="flex w-full items-center justify-center py-1">
 			<span data-testid="compaction-divider" className="px-1.5 text-xs text-muted-foreground/70">
-				Context compacted
+				{t("Context compacted")}
 			</span>
 		</div>
 	);
@@ -35,12 +38,15 @@ export function CompactionMomentDivider({ data: _data }: { data: CompactionDivid
  *  since release polish 2026-10-06 — the token count stays, the summary
  *  is inspectable only in provider logs. */
 export function CompactionCutDivider({ data }: { data: CompactionDividerData }) {
-	const kTok = data.details.tokensBefore > 0 ? ` · ${Math.round(data.details.tokensBefore / 1000)}k tok` : "";
+	const { t } = useI18n();
+	const label = data.details.tokensBefore > 0
+		? t("History compacted · {count}k tok", { count: Math.round(data.details.tokensBefore / 1000) })
+		: t("History compacted");
 	return (
 		<div data-testid="compaction-cut-divider" className="my-4 flex w-full items-center gap-3">
 			<span className="h-0 flex-1 border-t-2 border-dotted border-border/50" aria-hidden />
 			<span className="rounded-full border border-border/80 px-2.5 py-0.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-				History compacted{kTok}
+				{label}
 			</span>
 			<span className="h-0 flex-1 border-t-2 border-dotted border-border/50" aria-hidden />
 		</div>

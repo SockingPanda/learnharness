@@ -43,6 +43,13 @@ Hold the architecture along two orthogonal axes:
 
 **The unifying law** (generates everything else): **imports point inward, writes point to append-only evidence, and everything else is derived.** Dependency flows toward purity; data flows toward evidence; no state is stored where it can be recomputed.
 
+**Interface languages.** The Stage supports English and Simplified Chinese.
+Pure locale negotiation and translation catalogs live in `src/core/i18n.ts`
+and `src/core/i18n/`; `components/i18n.tsx` owns the browser preference and
+live context. The root layout resolves the same preference for SSR. This
+does not alter stored conversations, graph content, agent prompts or dictation
+settings. See [internationalization](i18n.md).
+
 ---
 
 ## 2. The layers and the import law

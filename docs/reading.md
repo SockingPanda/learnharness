@@ -1,12 +1,17 @@
 # Guided reading
 
-Choose **带读** in the sidebar, paste a web article URL and send. The existing
+Choose **Reading / 带读** in the sidebar, paste a web article URL and send. The existing
 per-session model and provider setup powers the guide. There is no preliminary
 probe, mandatory quiz or plan-acceptance gate. Chinese explanations follow the
 article's argument; each passage's original is collapsed beside its explanation.
 The first version accepts HTTP(S) web articles, up to 200,000 extracted characters.
 Fetch errors and oversized sources are reported rather than saved as a partial
 article. The original snapshot is reused for the life of the session.
+
+Reading controls, route panels and record labels follow the interface language
+selected in Settings → General. Guide explanations continue in Chinese;
+article text, model-authored route titles, personal records and saved navigation
+history retain their original wording.
 
 ## Reading and discussion
 

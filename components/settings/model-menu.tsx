@@ -1,4 +1,5 @@
 "use client";
+import { useI18n } from "@/components/i18n";
 /**
  * The model menu (extracted 2026-09-20 from model-picker.tsx, owner ask:
  * the agent settings' role selects use the EXACT same dropdown as the
@@ -60,6 +61,7 @@ export function ModelMenuList({
 	 *  Image-capable ones float to the top. */
 	vision?: boolean;
 }) {
+	const { t } = useI18n();
 	// Vision slot: built-ins must report image input; custom-endpoint models
 	// stay selectable (the endpoint may not report a modality). Image-capable
 	// ones float to the top of the list.
@@ -79,18 +81,18 @@ export function ModelMenuList({
 				searchTestid="model-search"
 				listTestid="model-list"
 				optionTestid={(m) => `model-option-${m.id.replace(/[^a-z0-9-]/gi, "_")}`}
-				placeholder="Search models…"
-				loading="Loading models…"
-				empty="No models match."
+				placeholder={t("Search models…")}
+				loading={t("Loading models…")}
+				empty={t("No models match.")}
 				renderItem={(m) => <>
 					<span className="flex items-center justify-between gap-2">
 						<span className="truncate text-card-foreground">{m.name}</span>
-						<span className="shrink-0 tabular-nums text-muted-foreground" title={m.provider === CLAUDE_CODE_PROVIDER ? "Billing is determined by your Claude Code configuration; LearnHarness does not estimate it." : subscriptionLabel(`${m.provider}:${m.id}`) ? "Subscription connection" : m.cost ? "USD per 1M tokens in/out" : "Price unavailable"}>
-							{m.provider === CLAUDE_CODE_PROVIDER ? "CLI billing" : subscriptionLabel(`${m.provider}:${m.id}`) ?? priceLabel(m.cost)}
+						<span className="shrink-0 tabular-nums text-muted-foreground" title={m.provider === CLAUDE_CODE_PROVIDER ? t("Billing is determined by your Claude Code configuration; LearnHarness does not estimate it.") : subscriptionLabel(`${m.provider}:${m.id}`) ? t("Subscription connection") : m.cost ? t("USD per 1M tokens in/out") : t("Price unavailable")}>
+							{m.provider === CLAUDE_CODE_PROVIDER ? t("CLI billing") : subscriptionLabel(`${m.provider}:${m.id}`) ?? t(priceLabel(m.cost))}
 						</span>
 					</span>
 					<span className="flex items-center justify-between gap-2 text-muted-foreground">
-						<span className="truncate">{subscriptionLabel(`${m.provider}:${m.id}`) ? `${subscriptionLabel(`${m.provider}:${m.id}`)} (subscription)` : m.provider} · {m.id}</span>
+						<span className="truncate">{subscriptionLabel(`${m.provider}:${m.id}`) ? t("{provider} (subscription)", { provider: subscriptionLabel(`${m.provider}:${m.id}`)! }) : m.provider} · {m.id}</span>
 						<span className="shrink-0 tabular-nums">{m.contextWindow === null ? "—" : formatTokens(m.contextWindow)}</span>
 					</span>
 				</>}
@@ -118,10 +120,11 @@ export function ThinkingMenuList({
 	empty?: string;
 	footer?: string;
 }) {
+	const { t } = useI18n();
 	return (
 		<>
 			{levels.length === 0 ? (
-				<div className="px-2 py-3 text-center text-muted-foreground">{empty ?? "No thinking levels."}</div>
+				<div className="px-2 py-3 text-center text-muted-foreground">{empty ?? t("No thinking levels.")}</div>
 			) : (
 				levels.map((level) => (
 					<button
@@ -133,7 +136,7 @@ export function ThinkingMenuList({
 							level === effectiveLevel ? "bg-muted/60 text-card-foreground" : "text-card-foreground"
 						}`}
 					>
-						<span>{level}</span>
+						<span>{t(level)}</span>
 						{level === effectiveLevel && <span aria-hidden>✓</span>}
 					</button>
 				))
@@ -157,6 +160,7 @@ export function ProviderMenuList({
 	providers: { id: string; envVar: string; label: string }[];
 	onPick: (provider: { id: string; envVar: string; label: string }) => void;
 }) {
+	const { t } = useI18n();
 	const [query, setQuery] = useState("");
 	const [menuIdx, setMenuIdx] = useState<number | null>(null);
 	const searchRef = useRef<HTMLInputElement>(null);
@@ -206,11 +210,11 @@ export function ProviderMenuList({
 						}
 					}
 				}}
-				placeholder="Search providers…"
+				placeholder={t("Search providers…")}
 				className="lh-input mb-1.5 w-full rounded-lg border bg-background px-2 py-1.5 text-foreground outline-none focus:ring-1 focus:ring-ring"
 			/>
 			{results.length === 0 && (
-				<div className="px-2 py-3 text-center text-muted-foreground">No providers match.</div>
+				<div className="px-2 py-3 text-center text-muted-foreground">{t("No providers match.")}</div>
 			)}
 			<ul ref={listRef} data-testid="provider-list" className="flex max-h-72 flex-col overflow-y-auto px-1">
 				{results.map((p, i) => (
@@ -241,7 +245,7 @@ export function ProviderMenuList({
  *  with the default first and a searched list drops it honestly — Enter
  *  can never pick a row that isn't on screen. Pure — exported for
  *  tests. */
-export function fontMenuResults(query: string, families: string[]): Array<string | null> {
+export function fontMenuResults(query: string, families: string[], defaultLabel = "default"): Array<string | null> {
 	const scored = families
 		.map((f) => ({ f, s: fuzzyScore(query, f) }))
 		.filter((r) => r.s !== null)
@@ -249,7 +253,7 @@ export function fontMenuResults(query: string, families: string[]): Array<string
 		.map((r) => r.f);
 	// The default row's searchable identity: the factory family + the
 	// word "default" (the suffix it renders with).
-	const defaultScore = fuzzyScore(query, "Source Sans 3", "default");
+	const defaultScore = fuzzyScore(query, "Source Sans 3", "default", defaultLabel);
 	if (query.trim() === "" || defaultScore !== null) return [null, ...scored];
 	return scored;
 }
@@ -258,7 +262,7 @@ export function fontMenuResults(query: string, families: string[]): Array<string
  *  query that matches NO family becomes the "Use '<query>'" custom pick —
  *  a matching family is the better pick, so the action row only exists
  *  when there is nothing else to pick. Exported for tests. */
-export function customFamilyFor(query: string, families: string[]): string | null {
+export function customFamilyFor(query: string, families: string[], defaultLabel = "default"): string | null {
 	const trimmed = query.trim();
 	if (trimmed === "") return null;
 	return fontMenuResults(query, families).length === 0 ? trimmed : null;
@@ -287,6 +291,7 @@ export function FontMenuList({
 	/** Quiet footer note under the list. */
 	footer?: string;
 }) {
+	const { t } = useI18n();
 	const [query, setQuery] = useState("");
 	const [menuIdx, setMenuIdx] = useState<number | null>(null);
 	const searchRef = useRef<HTMLInputElement>(null);
@@ -301,10 +306,10 @@ export function FontMenuList({
 		listRef.current?.querySelector(`[data-idx="${menuIdx}"]`)?.scrollIntoView({ block: "nearest" });
 	}, [menuIdx]);
 
-	const results = fontMenuResults(query, families ?? []);
+	const results = fontMenuResults(query, families ?? [], t("default"));
 	// The custom-family action row: only when a typed query matches
 	// nothing (a matching family is the better pick). Enter picks it.
-	const customFamily = customFamilyFor(query, families ?? []);
+	const customFamily = customFamilyFor(query, families ?? [], t("default"));
 	const walkable: Array<string | null> = customFamily !== null ? ["__custom__"] : results;
 
 	return (
@@ -336,10 +341,10 @@ export function FontMenuList({
 						}
 					}
 				}}
-				placeholder="Search fonts…"
+				placeholder={t("Search fonts…")}
 				className="lh-input mb-1.5 w-full rounded-lg border bg-background px-2 py-1.5 text-foreground outline-none focus:ring-1 focus:ring-ring"
 			/>
-			{!families && <div className="px-2 py-3 text-center text-muted-foreground">Loading fonts…</div>}
+			{!families && <div className="px-2 py-3 text-center text-muted-foreground">{t("Loading fonts…")}</div>}
 			<ul ref={listRef} data-testid="font-list" className="flex max-h-72 flex-col overflow-y-auto px-1">
 				{families &&
 					results.map((family, i) => {
@@ -357,7 +362,7 @@ export function FontMenuList({
 									}${effective && i !== menuIdx ? " bg-muted/60" : ""}`}
 								>
 									<span className="truncate text-card-foreground">{family ?? "Source Sans 3"}</span>
-									<span className="shrink-0 text-muted-foreground">{isDefault ? "default" : effective && <span aria-hidden>✓</span>}</span>
+									<span className="shrink-0 text-muted-foreground">{isDefault ? t("default") : effective && <span aria-hidden>✓</span>}</span>
 								</button>
 							</li>
 						);
@@ -373,8 +378,8 @@ export function FontMenuList({
 								menuIdx === 0 ? "bg-accent/40 ring-1 ring-inset ring-border" : ""
 							}`}
 						>
-							<span className="truncate text-card-foreground">Use “{customFamily}”</span>
-							<span className="shrink-0 text-muted-foreground">custom</span>
+							<span className="truncate text-card-foreground">{t("Use “{family}”", { family: customFamily })}</span>
+							<span className="shrink-0 text-muted-foreground">{t("custom")}</span>
 						</button>
 					</li>
 				)}

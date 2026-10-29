@@ -3,6 +3,7 @@ import { it } from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ReadingDiagram, ReadingSource, ReadingToolbar, ReadingPanel } from "../components/reading.tsx";
+import { I18nProvider } from "../components/i18n.tsx";
 import { applyReadingEvent, emptyReadingState, readingArticle } from "../src/core/reading.ts";
 
 const article = readingArticle("https://example.test/article", "# Title\n\nOriginal paragraph.");
@@ -12,9 +13,10 @@ const state = applyReadingEvent(applyReadingEvent(emptyReadingState(), { kind: "
 	{ id: "earlier", title: "以前的分支", blockIds: ["b2"], parentId: "main" },
 ] });
 const detour = applyReadingEvent(state, { kind: "focus", action: "discuss", nodeId: "branch" });
+const renderChinese = (node: React.ReactNode) => renderToStaticMarkup(<I18nProvider initialLocale="zh-CN" initialPreference="zh-CN">{node}</I18nProvider>);
 
 it("shows the article bookmark and active discussion together, with collapsed original and persistent chat actions", () => {
-	const toolbar = renderToStaticMarkup(<ReadingToolbar state={detour} busy={false} onOpen={() => {}} onAction={() => {}} />);
+	const toolbar = renderChinese(<ReadingToolbar state={detour} busy={false} onOpen={() => {}} onAction={() => {}} />);
 	assert.match(toolbar, /文章书签：文章主线/);
 	assert.match(toolbar, /正在展开：当前追问/);
 	assert.match(toolbar, /回到文章/);
@@ -29,7 +31,7 @@ it("shows the article bookmark and active discussion together, with collapsed or
 	assert.ok(!diagram.includes("plan-node-earlier"));
 	const expanded = renderToStaticMarkup(<ReadingDiagram state={detour} showBranches onSelect={() => {}} />);
 	assert.match(expanded, /plan-node-earlier/);
-	const panel = renderToStaticMarkup(<ReadingPanel state={detour} chatId="chat_1" busy={false} onClose={() => {}} onAction={() => {}} />);
+	const panel = renderChinese(<ReadingPanel state={detour} chatId="chat_1" busy={false} onClose={() => {}} onAction={() => {}} />);
 	assert.match(panel, /role="dialog"/);
 	assert.match(panel, /知识连接/);
 	assert.match(panel, /当前追问/);

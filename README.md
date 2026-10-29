@@ -35,7 +35,7 @@ The agent can also research questions in the background, create visual explanati
 
 ## Knowledge that carries forward
 
-**Guided reading:** choose **带读** in the sidebar and paste an article URL.
+**Guided reading:** choose **Reading / 带读** in the sidebar and paste an article URL.
 The guide reads the article first, then accompanies you through it in Chinese.
 Ask questions or explore a tangent at any point; the article bookmark stays
 put. **阅读路线与记录** shows the reading route, discussion branches, your
@@ -61,6 +61,8 @@ Add your provider API key and choose your models, then start a session with what
 
 All three platforms support in-app updates.
 
+**Interface language:** English and Simplified Chinese are available under **Settings → General → Interface language** (设置 → 通用 → 界面语言). The default follows your browser or system language. Your choice applies immediately and is remembered on this device. AI replies and dictation keep their existing language behavior.
+
 **Dictation:** Create a [Deepgram API key](https://console.deepgram.com/) with the **Member role or higher** ([required for token minting](https://developers.deepgram.com/reference/auth/tokens/grant)) and add it under **Settings → Providers → Dictation**. Choose the language below the key; **Multilingual** supports automatic recognition and mixed-language speech. A `403 Insufficient permissions` error during token minting can indicate an insufficient key role.
 
 ## Your keys, your data
@@ -79,6 +81,8 @@ npm test           # deterministic, no LLM, no network
 ```
 
 See the [development guide](docs/development.md), [architecture](docs/architecture.md), and [desktop release guide](docs/desktop-release.md).
+
+For UI translations and adding locales, see [internationalization](docs/i18n.md).
 
 Questions, bug reports, and feature requests: [GitHub Issues](https://github.com/amosblomqvist/learnharness/issues).
 

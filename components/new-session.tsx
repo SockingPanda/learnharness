@@ -1,5 +1,7 @@
 "use client";
 
+import { useI18n } from "@/components/i18n";
+
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { Conversation, ConversationContent, ConversationEmptyState } from "@/components/ai-elements/conversation";
@@ -108,6 +110,7 @@ export function DraftShell({
 	 *  Passed as a node so the pick state stays in NewSession. */
 	overlay?: ReactNode;
 }) {
+	const { t } = useI18n();
 	// Voice dictation (STT wave, 2026-09-17): finals append at the end of the
 	// draft text (via the parent's onChange — the truth lives there); the
 	// strip lives in the stats bar's middle slot.
@@ -170,11 +173,11 @@ export function DraftShell({
 						<Conversation className="h-full min-w-0 flex-1" initial="instant">
 							<ConversationContent className="min-h-full gap-0 p-0">
 								<ConversationEmptyState
-									title={mode === "reading" ? "一起读一篇文章" : mode === "practice" ? "New practice session" : "New session"}
+									title={t(mode === "reading" ? "Read an article together" : mode === "practice" ? "New practice session" : "New session")}
 									description={
-										mode === "reading" ? "贴上文章链接，开始中文带读。随时提问、展开讨论，再回到原文。" : mode === "practice"
-											? "Pick nodes from your knowledge graph, describe what you want to practice, or bring your own problem."
-											: "The teacher will open by probing what you already know."
+										mode === "reading" ? t("Paste an article link to start guided reading in Chinese. Ask questions, explore ideas, and return to the article at any time.") : mode === "practice"
+											? t("Pick nodes from your knowledge graph, describe what you want to practice, or bring your own problem.")
+											: t("The teacher will open by probing what you already know.")
 									}
 								/>
 							</ConversationContent>
@@ -188,7 +191,7 @@ export function DraftShell({
 									)}
 									setup={setupCta}
 								/>
-								{startError && <p role="alert" className="pointer-events-auto mb-2 text-sm text-destructive">{OPENING_PROMPT_FAILURE}</p>}
+								{startError && <p role="alert" className="pointer-events-auto mb-2 text-sm text-destructive">{t(OPENING_PROMPT_FAILURE)}</p>}
 								<div className="pointer-events-auto overflow-hidden rounded-2xl border bg-card shadow-lg">
 									<Composer
 										busy={busy}
@@ -204,7 +207,7 @@ export function DraftShell({
 										// input (owner refinement round, 2026-09-24) — no lesson has
 										// started yet, so the composer must not read like one is in
 										// flight.
-										placeholder={mode === "reading" ? "贴上文章链接，也可以说说你想重点读什么……" : mode === "practice" ? "What do you want to practice?" : "What do you want to learn?"}
+										placeholder={t(mode === "reading" ? "Paste an article link and tell me what you want to focus on…" : mode === "practice" ? "What do you want to practice?" : "What do you want to learn?")}
 									/>
 								</div>
 								<StatsBar
@@ -230,6 +233,7 @@ export function DraftShell({
 }
 
 export function NewSession({ initialConfigured, mode = "teach" }: { initialConfigured: boolean; mode?: "teach" | "practice" | "reading" }) {
+	const { t } = useI18n();
 	const router = useRouter();
 	const [text, setText] = useState("");
 	/* The draft MIRROR ("nothing gets lost" round, 2026-10-01): the shell's
@@ -366,7 +370,7 @@ export function NewSession({ initialConfigured, mode = "teach" }: { initialConfi
 								onClick={() => setSetupOpen(true)}
 								className="rounded-sm border border-border bg-card px-3 py-1.5 font-ui text-xs text-foreground transition-colors hover:border-muted-foreground/50 hover:bg-accent cursor-pointer"
 							>
-								Set up your models
+								{t("Set up your models")}
 							</button>
 						)
 					)

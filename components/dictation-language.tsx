@@ -1,4 +1,5 @@
 "use client";
+import { useI18n } from "@/components/i18n";
 
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { DICTATION_LANGUAGES, type DictationLanguage } from "@/src/core";
@@ -11,10 +12,17 @@ import { useDictationLanguage } from "@/components/dictation-preference";
 
 type LanguagePreference = ReturnType<typeof useDictationLanguage>;
 
+/** Translate catalog labels only; provider language codes stay unchanged. */
+function languageLabel(item: (typeof DICTATION_LANGUAGES)[number], t: ReturnType<typeof useI18n>["t"]) {
+	const suffix = ` (${item.code})`;
+	return item.label.endsWith(suffix) ? `${t(item.label.slice(0, -suffix.length))}${suffix}` : t(item.label);
+}
+
 export function DictationLanguageSetting() {
+	const { t } = useI18n();
 	const preference = useDictationLanguage();
 	const active = useDictationActive();
-	return <SettingsRow label="Language" testid="row-dictation-language" dimmed={active}>
+	return <SettingsRow label={t("Language")} testid="row-dictation-language" dimmed={active}>
 		<DictationLanguagePicker preference={preference} disabled={active} />
 	</SettingsRow>;
 }
@@ -23,10 +31,12 @@ function DictationLanguagePicker({ preference, disabled }: {
 	preference: LanguagePreference;
 	disabled: boolean;
 }) {
+	const { t } = useI18n();
 	const { language, saving, error, load, save } = preference;
 	const [open, setOpen] = useState(false);
 	const triggerRef = useRef<HTMLButtonElement>(null);
-	const label = DICTATION_LANGUAGES.find((item) => item.code === language)?.label ?? "—";
+	const selected = DICTATION_LANGUAGES.find((item) => item.code === language);
+	const label = selected ? languageLabel(selected, t) : "—";
 
 	useEffect(() => { if (disabled) setOpen(false); }, [disabled]);
 	useEffect(() => {
@@ -55,12 +65,12 @@ function DictationLanguagePicker({ preference, disabled }: {
 	};
 
 	return <>
-		<Hint label={error ?? `Dictation language: ${label}`} side="top">
+		<Hint label={error ? t(error) : t("Dictation language: {language}", { language: label })} side="top">
 			<SettingsMenuTrigger
 				ref={triggerRef}
 				value={label}
 				data-testid="dictation-language"
-				aria-label={`Dictation language: ${label}`}
+				aria-label={t("Dictation language: {language}", { language: label })}
 				aria-expanded={open && !disabled}
 				disabled={disabled || saving}
 				onKeyDown={(event) => { if (open) closeOnEscape(event); }}
@@ -86,21 +96,21 @@ function DictationLanguagePicker({ preference, disabled }: {
 					event.stopPropagation();
 				}
 			}}>
-				{error && <div role="alert" className="mb-1.5 text-destructive">{error}</div>}
+				{error && <div role="alert" className="mb-1.5 text-destructive">{t(error)}</div>}
 				<SearchMenuList
 					items={DICTATION_LANGUAGES}
 					itemKey={(item) => item.code}
-					searchTerms={(item) => [item.code, item.label]}
+					searchTerms={(item) => [item.code, item.label, languageLabel(item, t)]}
 					isSelected={(item) => item.code === language}
 					onPick={(item) => { void pick(item.code); }}
 					disabled={saving || language === undefined}
 					searchTestid="dictation-language-search"
 					listTestid="dictation-language-list"
 					optionTestid={(item) => `dictation-language-${item.code}`}
-					ariaLabel="Search dictation languages"
-					placeholder="Search languages…"
-					empty="No languages match."
-					renderItem={(item) => <span className="text-card-foreground">{item.label}</span>}
+					ariaLabel={t("Search dictation languages")}
+					placeholder={t("Search languages…")}
+					empty={t("No languages match.")}
+					renderItem={(item) => <span className="text-card-foreground">{languageLabel(item, t)}</span>}
 				/>
 			</div>
 		</MenuShell>}
