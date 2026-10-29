@@ -163,7 +163,7 @@ export function sessionCoverage(chatId: string): SessionCoverage | null {
 	const entries = stores.graphStore.readCoverage();
 	// Wave B: the record is native history — coverage reads through the
 	// projection (same view the extraction pipeline folds).
-	const cov = coverageOf(record.messages, entries, chatId);
+	const cov = coverageOf(record.messages, entries, chatId, record.kind === "reading");
 	let lastFoldedAt: string | null = null;
 	for (const entry of entries) {
 		if (entry.chatId !== chatId) continue;

@@ -22,6 +22,9 @@ import {
 	measuredContextTokens,
 	newAnswerResult,
 	newNextMessage,
+	newReadingNavigationMessage,
+	readingStateOf,
+	readingNavigationLabel,
 	newProblemDismissedMarker,
 	newThinkingMessage,
 	newUserMessage,
@@ -694,6 +697,9 @@ export class SessionModel {
 		// adoption can tell them from the record's absorbed copies.
 		const optimistic: LhMessage[] = [];
 		if (input.type === "text") optimistic.push({ ...newUserMessage(input.text), id: localId() });
+		else if (input.type === "reading") {
+			optimistic.push({ ...newReadingNavigationMessage(input, readingNavigationLabel(input, readingStateOf([...this.base, ...this.tail]))), id: localId() });
+		}
 		else if (input.type === "thinking") {
 			// The practice submissions (2026-10-04): the marker lands
 			// optimistically — the card renders from its details the

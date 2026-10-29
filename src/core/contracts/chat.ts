@@ -24,8 +24,9 @@ import type { EmissionStats } from "./graph.ts";
 /** The session's kind (practice sessions, owner 2026-10-04): "teach" is
  *  the default and ABSENT on pre-practice records (no migration — absence
  *  reads as teach); "practice" marks an adaptive-practice session — the
- *  practice agent, its two tools, no extraction, no graph writes. */
-export type ChatKind = "teach" | "practice";
+ *  practice agent, its two tools, no extraction, no graph writes.
+ *  "reading" uses a guide, article-grounded route and personal records. */
+export type ChatKind = "teach" | "practice" | "reading";
 
 export interface ChatRecord {
 	id: string;
@@ -52,7 +53,7 @@ export interface ChatRecord {
 	extractions?: ExtractionRunUsage[];
 	/** Per-chat model/thinking overrides for the conversation agents. */
 	settings?: ChatSettings;
-	/** SCHEMA STAMP (schema-versioning wave, owner 2026-10-10): LAZY v1 —
+	/** SCHEMA STAMP (schema-versioning wave, owner 2026-10-10): lazy —
 	 *  existing records stay unstamped (absence reads as v1); every write
 	 *  stamps the current version. A record stamped NEWER than this build
 	 *  (the downgrade scenario) is REFUSED on read: a read-modify-write
@@ -61,7 +62,9 @@ export interface ChatRecord {
 }
 
 /** The chat record format this build writes and understands. */
-export const CURRENT_CHAT_VERSION = 1;
+/** v2 adds reading sessions and their explicit navigation markers. Legacy
+ * records remain readable; an older build must refuse these new records. */
+export const CURRENT_CHAT_VERSION = 2;
 
 /** The conversation agents' runtime model choice (model-control wave,
  *  2026-09-12): a per-chat override of config.ts's pinned prober/teacher
@@ -310,6 +313,7 @@ export interface ArtifactPartProps {
 		toolCallId: string;
 		input?: unknown;
 		output?: unknown;
+		resultMessageId?: string;
 		/** The pose-side fold (owner round 17): the whole problem-call
 		 * arguments joined onto the conclude part by projectView — the
 		 * observability drawer's data. */

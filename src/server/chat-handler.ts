@@ -1,6 +1,7 @@
 import type { Usage } from "@earendil-works/pi-ai";
 import {
 	createPracticeAgent,
+	createReadingAgent,
 	createProberAgent,
 	createTeacherAgent,
 	type AgentBuildOptions,
@@ -61,6 +62,7 @@ import {
 } from "../core/input-events.ts";
 import { steerDelivered } from "../core/contracts.ts";
 import type {CallUsage} from "../core/contracts.ts";
+import { readingSessionContext } from "../core/reading.ts";
 
 /**
  * One chat turn over the server-owned native record. Framework-free (plain
@@ -268,12 +270,12 @@ export async function handleChatInput(
 			engine: piEngineForSpec(conversation, true),
 			canStart: () => connectionBackgroundAllowed(conversation.provider),
 			modelId: modelIdForCompaction,
-			kind: record.kind === "practice" ? "practice" : hasProbeDone(record.messages) ? "teach" : "probe",
+			kind: record.kind === "reading" ? "reading" : record.kind === "practice" ? "practice" : hasProbeDone(record.messages) ? "teach" : "probe",
 			thresholdTokens: effectiveThresholdTokens(
 				effective.compaction?.thresholdTokens,
 				catalogContextLimits().get(modelIdForCompaction),
 			),
-			systemPromptTokens: Math.ceil(composeInstructions(record.kind === "practice" ? "practice" : "teacher").length / 4),
+			systemPromptTokens: Math.ceil((composeInstructions(record.kind === "reading" ? "reading" : record.kind === "practice" ? "practice" : "teacher").length + (record.kind === "reading" ? readingSessionContext(record.messages).length : 0)) / 4),
 		},
 		chatId,
 	);
@@ -439,6 +441,7 @@ export async function handleChatInput(
 		// point as the tool delta — the agent layer composes the system
 		// prompt fresh per turn, swapping in any enabled override segments.
 		promptSwitches: effective.agent.prompts,
+		...(record.kind === "reading" ? { readingContext: readingSessionContext(merged) } : {}),
 	};
 	// PRACTICE BRANCH (owner design, 2026-10-04): a kind:"practice"
 	// session builds the practitioner from turn 1 — no prober→teacher
@@ -447,6 +450,10 @@ export async function handleChatInput(
 	// uniform across kinds).
 	const constructed: TeachingAgent = buildAgent
 		? buildAgent({ ...agentOpts, teaching })
+		: record.kind === "reading"
+			? createReadingAgent({ chatId, chatStore: stores.chatStore,
+				...(graphToolsEnabled(effective) ? { graphStore: stores.graphStore } : {}),
+			}, agentOpts)
 		: record.kind === "practice"
 			? createPracticeAgent(
 					{
@@ -643,12 +650,12 @@ export async function handleChatInput(
 							engine: kickEngine,
 							canStart: () => connectionBackgroundAllowed(spec.provider),
 							modelId: kickModelId,
-							kind: freshRecord.kind === "practice" ? "practice" : hasProbeDone(freshRecord.messages) ? "teach" : "probe",
+							kind: freshRecord.kind === "reading" ? "reading" : freshRecord.kind === "practice" ? "practice" : hasProbeDone(freshRecord.messages) ? "teach" : "probe",
 							thresholdTokens: effectiveThresholdTokens(
 								fresh.compaction?.thresholdTokens,
 								catalogContextLimits().get(kickModelId),
 							),
-							systemPromptTokens: Math.ceil(composeInstructions(freshRecord.kind === "practice" ? "practice" : "teacher").length / 4),
+							systemPromptTokens: Math.ceil((composeInstructions(freshRecord.kind === "reading" ? "reading" : freshRecord.kind === "practice" ? "practice" : "teacher").length + (freshRecord.kind === "reading" ? readingSessionContext(freshRecord.messages).length : 0)) / 4),
 						};
 					}, chatId);
 			},

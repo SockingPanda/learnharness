@@ -36,16 +36,19 @@ import {
 	danglingQuestionOf,
 	newAnswerResult,
 	newNextMessage,
+	newReadingNavigationMessage,
 	newProblemDismissedMarker,
 	newThinkingMessage,
 	newUserMessage,
 	pendingProblemDismissalOf,
 } from "./native-messages.ts";
 import { QUESTION_TOOLS, toolQuestionKind } from "./pending.ts";
+import { readingStateOf, readingNavigationLabel, type ReadingNavigation } from "./reading.ts";
 
 /** One client-originated input event (the POST body's `input`). */
 export type ChatInput =
 	| { type: "text"; text: string }
+	| ({ type: "reading" } & ReadingNavigation)
 	| { type: "answer"; toolCallId: string; answer: QuestionAnswerData }
 	| { type: "continue" }
 	/** The failed-turn retry (issue #110): the banner's Retry button. */
@@ -160,6 +163,11 @@ export function parseChatInput(input: unknown): ChatInput {
 	if (typeof input !== "object" || input === null) throw new ChatInputError("input must be an object");
 	const i = input as Record<string, unknown>;
 	switch (i.type) {
+		case "reading": {
+			if (!["next", "return", "skip", "review", "read", "discuss"].includes(String(i.action))) throw new ChatInputError("Unknown reading action");
+			if ((i.action === "read" || i.action === "discuss") && (typeof i.nodeId !== "string" || !i.nodeId)) throw new ChatInputError("Reading jump requires nodeId");
+			return { type: "reading", action: i.action as ReadingNavigation["action"], ...(typeof i.nodeId === "string" ? { nodeId: i.nodeId } : {}) };
+		}
 		case "text":
 			if (typeof i.text !== "string" || (i.text as string).trim().length === 0) {
 				throw new ChatInputError("text input requires non-empty text");
@@ -206,6 +214,16 @@ export function inputAppends(
 	input: ChatInput,
 ): LhMessage[] {
 	switch (input.type) {
+		case "reading": {
+			if (record.kind !== "reading") throw new ChatInputError("Reading navigation requires a reading session");
+			const state = readingStateOf(record.messages);
+			if (!state.nodes.length) throw new ChatInputError("The reading route is not ready yet");
+			if (input.action === "read" || input.action === "discuss") {
+				const node = state.nodes.find((n) => n.id === input.nodeId);
+				if (!node || (input.action === "read" && node.parentId) || (input.action === "discuss" && !node.parentId)) throw new ChatInputError("Reading navigation targets no matching route node");
+			}
+			return [newReadingNavigationMessage(input, readingNavigationLabel(input, state))];
+		}
 		case "text":
 			return [...dismissalConclusion(record), newUserMessage(input.text)];
 		case "answer": {

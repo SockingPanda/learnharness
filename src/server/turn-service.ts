@@ -116,8 +116,10 @@ export function triggerExtraction(
 	try {
 		const record = deps.chatStore.getChat(chatId);
 		if (!record) return;
-		const covered = coverageOf(record.messages, deps.graphStore.readCoverage(), chatId);
-		if (covered.uncoveredTokens < chunkTokens) return;
+		const covered = coverageOf(record.messages, deps.graphStore.readCoverage(), chatId, record.kind === "reading");
+		// Reading also flushes short exchanges, so personal discoveries need
+		// not wait for an entire article to cross the usual teaching budget.
+		if (covered.uncoveredTokens === 0 || (record.kind !== "reading" && covered.uncoveredTokens < chunkTokens)) return;
 		void extraction.runExtraction(chatId).catch((err) => {
 			// BYOK (owner, 2026-09-22) + key presence (provider-key interlude,
 			// 2026-09-25): an unconfigured OR keyless write channel SKIPS (the

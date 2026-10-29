@@ -6,6 +6,7 @@ import { VisualCard } from "@/components/artifacts/visual-card";
 import { ProbeDoneCard } from "@/components/artifacts/probe-done-card";
 import { ToolCallCard } from "@/components/artifacts/tool-call-card";
 import { ProblemCard, ConcludeCard } from "@/components/practice-cards";
+import { ReadingArtifact } from "@/components/reading";
 
 /**
  * Artifact renderer registry — the extension point for tool-part UI.
@@ -20,6 +21,11 @@ import { ProblemCard, ConcludeCard } from "@/components/practice-cards";
  * artifact itself from part.output.
  */
 export const artifactRenderers: Record<string, ComponentType<ArtifactPartProps>> = {
+	reading_load: ReadingArtifact,
+	reading_plan: ReadingArtifact,
+	reading_focus: ReadingArtifact,
+	reading_note: ReadingArtifact,
+	reading_source: ToolCallCard,
 	research: JobCard,
 	pdf: PdfJobCard, // sources v0 — live smoke 2026-09-19 caught the gap: without this the tool-pdf dispatch part rendered nothing
 	// plan_* parts render nothing inline by design: the phase seam is a

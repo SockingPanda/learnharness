@@ -15,6 +15,8 @@ import {
 	type TeacherToolContext,
 } from "./tools.ts";
 import { practiceTools, type PracticeToolContext } from "./tools/practice.ts";
+import { readingTools, type ReadingToolContext } from "./tools/reading.ts";
+import { auditorGraphTools } from "./tools/graph.ts";
 import { healToolRecord, withArgumentHeal } from "./tools/heal.ts";
 import { sendToUserTool } from "./tools/send-to-user.ts";
 import { createReadTool, readTool } from "./tools/read.ts";
@@ -51,7 +53,7 @@ import { usageWasAdmitted } from "./subscription-request-cycle.ts";
 
 /** Which agent's prompt directory to compose. Practice (2026-10-04)
  *  composes ONLY its own directory — see prompt-segments.ts. */
-export type AgentKind = "prober" | "teacher" | "practice";
+export type AgentKind = "prober" | "teacher" | "practice" | "reading";
 
 // P2 (2026-09-19): segment discovery + override resolution live in ONE
 // canonical place now — src/store/prompt-overrides.ts (listSourceSegments
@@ -91,6 +93,7 @@ const composedInstructions: Record<AgentKind, string> = {
 	prober: composeInstructions("prober"),
 	teacher: composeInstructions("teacher"),
 	practice: composeInstructions("practice"),
+	reading: composeInstructions("reading"),
 };
 
 // Money channel (wave 4): the chat-handler passes a per-turn collector;
@@ -100,6 +103,8 @@ export type StepUsageCollector = (usage: Usage) => void;
 
 /** Per-request construction options (the handler wires all of these). */
 export interface AgentBuildOptions {
+	/** Rebuilt from the full reading log, independent of the model's cut. */
+	readingContext?: string;
 	/** Model + stream function — tests inject a scripted faux engine. */
 	engine?: PiEngine;
 	callPurpose?: { background: boolean };
@@ -181,7 +186,7 @@ function baseAgentOptions(kind: AgentKind, opts: AgentBuildOptions, tools: Agent
 	// the session's conversation engine — practice rides the same
 	// conversation-spec resolution as teaching); the cast keeps AgentKind
 	// ("practice" is not a ModelRole) honest about that.
-	const engine = opts.engine ?? piEngineFor(kind as "prober" | "teacher");
+	const engine = opts.engine ?? piEngineFor(kind === "reading" ? "teacher" : kind as "prober" | "teacher");
 	const stopper = makeQuestionStopper(kind);
 	const systemPrompt = opts.promptSwitches
 		? composeInstructions(kind, opts.promptSwitches)
@@ -195,7 +200,7 @@ function baseAgentOptions(kind: AgentKind, opts: AgentBuildOptions, tools: Agent
 		identity: APP_IDENTITY,
 		sessionId: opts.chatId,
 		initialState: {
-			systemPrompt,
+			systemPrompt: opts.readingContext ? `${systemPrompt}\n\n${opts.readingContext}` : systemPrompt,
 			model: engine.model,
 			thinkingLevel: engine.level,
 			// Conditional registry inclusion, like the graph-tool gates: when
@@ -338,6 +343,15 @@ export function bareQuestionTools(): Record<string, AgentTool<any>> {
 export function createPracticeAgent(ctx: PracticeToolContext, opts: AgentBuildOptions = {}) {
 	const tools = opts.tools ?? practiceTools(ctx);
 	return baseAgentOptions("practice", opts, Object.values(tools));
+}
+
+/** Reading has no probe or quiz tools; ordinary questions stay in chat. */
+export function createReadingAgent(ctx: ReadingToolContext, opts: AgentBuildOptions = {}) {
+	const tools = opts.tools ?? {
+		...readingTools(ctx),
+		...(ctx.graphStore ? auditorGraphTools({ chatStore: ctx.chatStore, graphStore: ctx.graphStore }) : {}),
+	};
+	return baseAgentOptions("reading", opts, Object.values(tools));
 }
 
 export type ProberAgent = ReturnType<typeof createProberAgent>;

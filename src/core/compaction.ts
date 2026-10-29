@@ -376,8 +376,17 @@ export function buildCompactionPrompt(input: {
 	/** The plan tree rendered (planTreeToText) or null. */
 	planTreeText: string | null;
 	/** The session kind (wording: tutor vs practice agent). */
-	kind: "teach" | "practice" | "probe";
+	kind: "teach" | "practice" | "probe" | "reading";
 }): string {
+	if (input.kind === "reading") return `Summarize this guided reading conversation for its future guide.
+Preserve the author's argument, the learner's own expressed understanding and discoveries,
+unresolved questions, discussion detours and commitments. Distinguish source claims,
+guide explanations and learner statements. Never infer mastery from reading progress.
+Keep all message ids, route ids, block ids and graph ids exact. The source snapshot,
+route, article bookmark, active discussion and personal notes are restored separately
+from the full saved session; do not invent replacements for them. Explain how the
+current discussion relates back to the article and what remains to be read.
+TRANSCRIPT:\n${input.spanText}`;
 	const planSection =
 		input.planTreeText ?? "No plan tree exists in this session (nothing was persisted).";
 	return `You are compacting the earlier part of a tutoring session — writing the summary your future self will read INSTEAD of that transcript. Everything before the cut is replaced by what you write; everything after stays verbatim. The learner's transcript below labels the learner as [LEARNER], the tutoring agent as [TUTOR], tool traffic as [RESULT …]/[SYSTEM NOTE].
