@@ -186,7 +186,9 @@ export function toModelDto(model: Model<Api>): ModelDto {
 			cacheWrite: model.cost.cacheWrite,
 		},
 		contextWindow: model.provider === CLAUDE_CODE_PROVIDER ? null : model.contextWindow,
-		maxTokens: model.provider === CLAUDE_CODE_PROVIDER ? null : model.maxTokens,
+		// A discovered ChatGPT model has no advertised output limit. Zero is
+		// an internal unknown sentinel, never a capacity displayed to the user.
+		maxTokens: model.provider === CLAUDE_CODE_PROVIDER || (model.provider === "chatgpt" && model.maxTokens === 0) ? null : model.maxTokens,
 	};
 }
 

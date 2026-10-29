@@ -1,11 +1,12 @@
 import type { Model } from "@earendil-works/pi-ai";
 import { onWebSubscriptionPacket, webSubscriptionRequest, webSubscriptionsEnabled } from "./subscription-runtime.ts";
-import type { ChatGPTStatus } from "../core/contracts/chatgpt.ts";
+import { resolveChatGPTModel } from "./chatgpt-models.ts";
+import type { ChatGPTCatalogEntry, ChatGPTStatus } from "../core/contracts/chatgpt.ts";
 import type { AdmissionScope, NoDispatchKind } from "./chatgpt-request-cycle.ts";
 export type { ChatGPTStatus } from "../core/contracts/chatgpt.ts";
 export interface Stamp { epoch: number; authorityRevision: number; revision: number }
 interface StatusValue extends Stamp { status: ChatGPTStatus }
-interface ModelsValue extends StatusValue { accountId: string | null; models: { id: string; name: string }[] }
+interface ModelsValue extends StatusValue { accountId: string | null; models: ChatGPTCatalogEntry[] }
 interface LeaseValue extends Stamp { accessToken: string; accountId: string }
 interface Pending { op: string; resolve: (v: unknown) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }
 interface BridgeState {
@@ -111,7 +112,7 @@ export async function chatGPTDenial(scope: AdmissionScope | undefined, controlle
  if (controller.signal.reason === "all" || !chatGPTScopeCurrent(scope)) return "all";
  return !chatGPTBackgroundAllowed() ? "background" : "other";
 }
-/** Preserve account order; unknown capabilities/windows are never fabricated. */
+/** Refresh account capabilities without waiting for a bundled Pi catalog update. */
 export async function refreshChatGPTModels(supported: Model<"openai-responses">[]): Promise<void> {
  const state = bridge();
  if (!runtimeConnected()) { clearCatalog(state); return; }
@@ -123,8 +124,8 @@ export async function refreshChatGPTModels(supported: Model<"openai-responses">[
   if (value.epoch !== state.stamp.epoch || value.authorityRevision !== state.stamp.authorityRevision || value.accountId !== state.status.activeId || !chatGPTConnected()) return;
   state.catalogAccount = value.accountId;
   state.models = value.models.flatMap((entry) => {
-   const known = supported.find((m) => m.id === entry.id && m.api === "openai-responses");
-   return known ? [{ ...known, provider: "chatgpt", name: entry.name, headers: undefined, samplingParams: undefined, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] : [];
+   const model = resolveChatGPTModel(entry, supported);
+   return model ? [model] : [];
   });
  } catch { if (sequence === state.catalogRequest) clearCatalog(state); }
 }

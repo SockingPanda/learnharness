@@ -25,3 +25,13 @@ export interface ChatGPTControlBridge {
 	consent(enabled: boolean): Promise<ChatGPTStatus>;
 	onChange(callback: () => void): () => void;
 }
+
+/** Allowlisted, credential-free account catalog metadata. Older owners may
+ * provide only id/name; unknown models then remain unavailable. */
+export interface ChatGPTCatalogEntry {
+	id: string;
+	name: string;
+	contextWindow?: number;
+	input?: ("text" | "image")[];
+	reasoningEfforts?: string[];
+}

@@ -3,6 +3,7 @@
 // LearnHarness-owned public-client OAuth. Never import pi's bundled login.
 // This module is main-process-only; dependencies are injectable for scratch tests.
 const crypto = require("node:crypto");
+const { projectChatGPTModel } = require("./chatgpt-catalog.cjs");
 const http = require("node:http");
 const fs = require("node:fs/promises");
 const path = require("node:path");
@@ -423,7 +424,10 @@ function createChatGPT({ store, openExternal, fetch: request = globalThis.fetch,
 			const body = await json(`${RESOURCE}/models`, { headers: { Authorization: `Bearer ${token.accessToken}` }, signal: AbortSignal.any([transportAbort.signal, AbortSignal.timeout(15000)]) });
 			authorized(false, undefined, token.epoch);
 			if (sequence !== catalogSequence || active()?.id !== token.accountId || !Array.isArray(body.models)) throw fail("catalog");
-			const visible = body.models.filter((m) => m && m.visibility === "list" && nonempty(m.slug) && typeof m.display_name === "string").map((m) => ({ id: m.slug, name: m.display_name }));
+			const visible = body.models.flatMap((model) => {
+				const entry = projectChatGPTModel(model);
+				return entry ? [entry] : [];
+			});
 			const changed = JSON.stringify(visible) !== JSON.stringify(catalog);
 			catalog = visible;
 			if (changed) authorityRevision++;
